@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+from datetime import date
 
 import pandas as pd
 import plotly.express as px
@@ -17,7 +18,6 @@ from src.fill_rate_engine import (
     load_fill_rate,
 )
 
-st.set_page_config(page_title="Delivery Fill Rate Dashboard", layout="wide")
 st.title("Delivery Fill Rate Dashboard")
 st.caption(
     "Upload a SAP/BW Delivery Fill Rate Excel export to analyze shortages, "
@@ -25,7 +25,7 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — inputs
+# Sidebar — upload + threshold
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Upload & Settings")
@@ -52,7 +52,7 @@ if uploaded_file is None:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Load & process data (cached per file + threshold)
+# Load & process (cached per file + threshold)
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def _process(file_bytes: bytes, threshold: float):
@@ -67,20 +67,181 @@ with st.spinner("Reading and cleaning data — please wait..."):
         st.stop()
 
 if df_clean.empty:
-    st.warning("The file was read but no data rows were found. Check that the file contains actual data.")
+    st.warning("The file was read but no data rows were found.")
     st.stop()
 
-kpis = build_kpis(df_clean)
-shortage_df = build_shortage_report(df_clean)
-product_df = build_product_summary(df_clean)
-plant_df = build_plant_summary(df_clean)
-top10 = build_top10(df_clean)
+# ---------------------------------------------------------------------------
+# Filter panel (sidebar, below upload)
+# ---------------------------------------------------------------------------
+# Use a session-state counter to reset widget keys on demand.
+if "dfr_filter_version" not in st.session_state:
+    st.session_state["dfr_filter_version"] = 0
 
-st.success(
-    f"Loaded **{len(df_clean):,}** rows — "
-    f"**{kpis['num_shorted_lines']:,}** shorted lines, "
-    f"**{kpis['num_products_impacted']:,}** products impacted."
-)
+_v = st.session_state["dfr_filter_version"]
+
+with st.sidebar:
+    st.markdown("---")
+    st.header("Filters")
+
+    def _opts(col: str) -> list:
+        if col not in df_clean.columns:
+            return []
+        return sorted(df_clean[col].dropna().unique().tolist())
+
+    sel_plant = st.multiselect(
+        "Plant", _opts("plant"), key=f"dfr_plant_{_v}"
+    )
+    sel_product = st.multiselect(
+        "Product", _opts("product"), key=f"dfr_product_{_v}"
+    )
+    sel_obd = st.multiselect(
+        "Outbound Delivery", _opts("outbound_delivery"), key=f"dfr_obd_{_v}"
+    )
+    sel_so = st.multiselect(
+        "Sales Order", _opts("sales_order"), key=f"dfr_so_{_v}"
+    )
+
+    # Date range filter
+    has_date = "requested_delivery_date" in df_clean.columns
+    if has_date:
+        valid_dates = df_clean["requested_delivery_date"].dropna()
+        min_date = valid_dates.min().date() if not valid_dates.empty else date.today()
+        max_date = valid_dates.max().date() if not valid_dates.empty else date.today()
+        date_range = st.date_input(
+            "Requested Delivery Date",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key=f"dfr_date_{_v}",
+        )
+        # date_input returns a tuple when range mode, or single date during selection
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            sel_date_start, sel_date_end = date_range
+        else:
+            sel_date_start = sel_date_end = None
+    else:
+        sel_date_start = sel_date_end = None
+
+    sel_status = st.multiselect(
+        "Shortage Status", _opts("Shortage Status"), key=f"dfr_status_{_v}"
+    )
+    sel_priority = st.multiselect(
+        "Priority", _opts("Priority"), key=f"dfr_priority_{_v}"
+    )
+    sel_wh = st.multiselect(
+        "WH Fill Status", _opts("WH Fill Status"), key=f"dfr_wh_{_v}"
+    )
+    sel_cust = st.multiselect(
+        "Customer Fill Status", _opts("Customer Fill Status"), key=f"dfr_cust_{_v}"
+    )
+
+    st.markdown("---")
+    sort_options = [
+        "Highest Short Amount",
+        "Highest Short Qty",
+        "Lowest WH Fill Rate",
+        "Lowest Customer Fill Rate",
+        "Requested Delivery Date",
+        "Product",
+        "Plant",
+    ]
+    sort_by = st.selectbox("Sort By", sort_options, index=0, key=f"dfr_sort_{_v}")
+
+    if st.button("Reset Filters", key="dfr_reset"):
+        st.session_state["dfr_filter_version"] += 1
+        st.rerun()
+
+# ---------------------------------------------------------------------------
+# Apply filters to df_clean → df_filtered
+# ---------------------------------------------------------------------------
+df_filtered = df_clean.copy()
+
+if sel_plant:
+    df_filtered = df_filtered[df_filtered["plant"].isin(sel_plant)]
+if sel_product:
+    df_filtered = df_filtered[df_filtered["product"].isin(sel_product)]
+if sel_obd and "outbound_delivery" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["outbound_delivery"].isin(sel_obd)]
+if sel_so and "sales_order" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["sales_order"].isin(sel_so)]
+if has_date and sel_date_start and sel_date_end:
+    mask = (
+        df_filtered["requested_delivery_date"].dt.date >= sel_date_start
+    ) & (
+        df_filtered["requested_delivery_date"].dt.date <= sel_date_end
+    )
+    df_filtered = df_filtered[mask]
+if sel_status and "Shortage Status" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["Shortage Status"].isin(sel_status)]
+if sel_priority and "Priority" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["Priority"].isin(sel_priority)]
+if sel_wh and "WH Fill Status" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["WH Fill Status"].isin(sel_wh)]
+if sel_cust and "Customer Fill Status" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["Customer Fill Status"].isin(sel_cust)]
+
+df_filtered = df_filtered.reset_index(drop=True)
+
+# ---------------------------------------------------------------------------
+# Apply sort to df_filtered
+# ---------------------------------------------------------------------------
+_short_amt_col = "total_short_amount" if "total_short_amount" in df_filtered.columns else "short_amount"
+
+_sort_map = {
+    "Highest Short Amount":      (_short_amt_col,           False),
+    "Highest Short Qty":         ("short_quantity",          False),
+    "Lowest WH Fill Rate":       ("wh_fill_rate",            True),
+    "Lowest Customer Fill Rate": ("customer_fill_rate",      True),
+    "Requested Delivery Date":   ("requested_delivery_date", True),
+    "Product":                   ("product",                 True),
+    "Plant":                     ("plant",                   True),
+}
+
+_sort_col, _sort_asc = _sort_map.get(sort_by, (_short_amt_col, False))
+if _sort_col in df_filtered.columns:
+    df_filtered = df_filtered.sort_values(_sort_col, ascending=_sort_asc, na_position="last").reset_index(drop=True)
+
+# ---------------------------------------------------------------------------
+# Rebuild all summaries from filtered data
+# ---------------------------------------------------------------------------
+kpis       = build_kpis(df_filtered)
+shortage_df = build_shortage_report(df_filtered)
+# Shortage report sorted by highest short amount by default
+if _short_amt_col in shortage_df.columns:
+    shortage_df = shortage_df.sort_values(_short_amt_col, ascending=False).reset_index(drop=True)
+
+product_df = build_product_summary(df_filtered)
+# Product summary (Column C = product) sorted by Short Amount (Column N) descending
+if product_df is not None and not product_df.empty:
+    amt_cols_prod = [c for c in product_df.columns if "amount" in c.lower()]
+    if amt_cols_prod:
+        product_df = product_df.sort_values(amt_cols_prod[0], ascending=False).reset_index(drop=True)
+
+plant_df   = build_plant_summary(df_filtered)
+top10      = build_top10(df_filtered)
+
+# Active filter indicator
+_active_filters = any([
+    sel_plant, sel_product, sel_obd, sel_so,
+    sel_status, sel_priority, sel_wh, sel_cust,
+    (has_date and sel_date_start and sel_date_end and
+     (sel_date_start != min_date if has_date else False)),
+])
+if _active_filters:
+    st.info(
+        f"Filters active — showing **{len(df_filtered):,}** of **{len(df_clean):,}** rows. "
+        "Use **Reset Filters** in the sidebar to clear."
+    )
+    st.success(
+        f"**{kpis['num_shorted_lines']:,}** shorted lines · "
+        f"**{kpis['num_products_impacted']:,}** products impacted"
+    )
+else:
+    st.success(
+        f"Loaded **{len(df_clean):,}** rows — "
+        f"**{kpis['num_shorted_lines']:,}** shorted lines, "
+        f"**{kpis['num_products_impacted']:,}** products impacted."
+    )
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -108,28 +269,27 @@ with tab_exec:
     st.subheader("Key Performance Indicators")
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Order Qty", f"{kpis['total_order_qty']:,.0f}")
-    c2.metric("Total Delivered Qty", f"{kpis['total_delivered_qty']:,.0f}")
-    c3.metric("Total Short Qty", f"{kpis['total_short_qty']:,.0f}")
+    c1.metric("Total Order Qty",       f"{kpis['total_order_qty']:,.0f}")
+    c2.metric("Total Delivered Qty",   f"{kpis['total_delivered_qty']:,.0f}")
+    c3.metric("Total Short Qty",       f"{kpis['total_short_qty']:,.0f}")
 
     c4, c5, c6 = st.columns(3)
-    c4.metric("Total Short Amount", f"${kpis['total_short_amount']:,.2f}")
-    c5.metric("Overall WH Fill Rate", f"{kpis['overall_wh_fill_rate']:.1f}%")
-    c6.metric("Overall Customer Fill Rate", f"{kpis['overall_customer_fill_rate']:.1f}%")
+    c4.metric("Total Short Amount",        f"${kpis['total_short_amount']:,.2f}")
+    c5.metric("Overall WH Fill Rate",      f"{kpis['overall_wh_fill_rate']:.1f}%")
+    c6.metric("Overall Customer Fill Rate",f"{kpis['overall_customer_fill_rate']:.1f}%")
 
     c7, c8, c9 = st.columns(3)
     c7.metric("Outbound Deliveries", f"{kpis['num_deliveries']:,}")
-    c8.metric("Shorted Lines", f"{kpis['num_shorted_lines']:,}")
-    c9.metric("Products Impacted", f"{kpis['num_products_impacted']:,}")
+    c8.metric("Shorted Lines",       f"{kpis['num_shorted_lines']:,}")
+    c9.metric("Products Impacted",   f"{kpis['num_products_impacted']:,}")
 
     st.markdown("---")
     st.subheader("Charts")
 
     col_l, col_r = st.columns(2)
 
-    # Shorted vs Fully Delivered
-    if "Shortage Status" in df_clean.columns:
-        status_counts = df_clean["Shortage Status"].value_counts().reset_index()
+    if "Shortage Status" in df_filtered.columns:
+        status_counts = df_filtered["Shortage Status"].value_counts().reset_index()
         status_counts.columns = ["Status", "Count"]
         fig_pie = px.pie(
             status_counts,
@@ -143,10 +303,9 @@ with tab_exec:
         fig_pie.update_layout(margin=dict(t=40, b=0, l=0, r=0))
         col_l.plotly_chart(fig_pie, use_container_width=True)
 
-    # Fill Rate by Plant
     if plant_df is not None and not plant_df.empty:
-        plant_col = plant_df.columns[0]
-        rate_cols = [c for c in plant_df.columns if "fill rate" in c.lower()]
+        plant_col  = plant_df.columns[0]
+        rate_cols  = [c for c in plant_df.columns if "fill rate" in c.lower()]
         if rate_cols:
             fig_plant_rate = px.bar(
                 plant_df.sort_values(rate_cols[0]),
@@ -168,10 +327,9 @@ with tab_exec:
 
     col_l2, col_r2 = st.columns(2)
 
-    # Short Amount by Plant
     if plant_df is not None and not plant_df.empty:
         plant_col = plant_df.columns[0]
-        amt_cols = [c for c in plant_df.columns if "amount" in c.lower()]
+        amt_cols  = [c for c in plant_df.columns if "amount" in c.lower()]
         if amt_cols:
             fig_plant_amt = px.bar(
                 plant_df.sort_values(amt_cols[0], ascending=False),
@@ -188,10 +346,9 @@ with tab_exec:
             )
             col_l2.plotly_chart(fig_plant_amt, use_container_width=True)
 
-    # Short Quantity by Product (top 15)
     if product_df is not None and not product_df.empty:
-        prod_col = product_df.columns[0]
-        qty_cols = [c for c in product_df.columns if "short qty" in c.lower()]
+        prod_col  = product_df.columns[0]
+        qty_cols  = [c for c in product_df.columns if "short qty" in c.lower()]
         if qty_cols:
             top_prods = product_df.sort_values(qty_cols[0], ascending=False).head(15)
             fig_prod_qty = px.bar(
@@ -214,28 +371,24 @@ with tab_exec:
 # ── Shortage Report ─────────────────────────────────────────────────────────
 with tab_short:
     st.subheader(f"Shortage Report — {len(shortage_df):,} problem lines")
+    st.caption("Sorted by highest Short Amount. Use sidebar filters to narrow results.")
     if shortage_df.empty:
         st.success("No shortages or fill rate issues found.")
     else:
-        if "Priority" in shortage_df.columns:
-            priorities = ["All"] + sorted(shortage_df["Priority"].dropna().unique().tolist())
-            sel_priority = st.selectbox("Filter by Priority", priorities, key="short_priority")
-            view = shortage_df if sel_priority == "All" else shortage_df[shortage_df["Priority"] == sel_priority]
-        else:
-            view = shortage_df
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(shortage_df, use_container_width=True, hide_index=True)
 
 # ── Product Summary ─────────────────────────────────────────────────────────
 with tab_prod:
     st.subheader("Product Summary")
+    st.caption("Grouped by Product (Column C) · sorted by highest Short Amount (Column N)")
     if product_df is None or product_df.empty:
         st.info("Product column not found or no data to summarize.")
     else:
         st.dataframe(product_df, use_container_width=True, hide_index=True)
-        prod_col = product_df.columns[0]
-        amt_cols = [c for c in product_df.columns if "amount" in c.lower()]
+        prod_col  = product_df.columns[0]
+        amt_cols  = [c for c in product_df.columns if "amount" in c.lower()]
         if amt_cols:
-            top15 = product_df.sort_values(amt_cols[0], ascending=False).head(15)
+            top15 = product_df.head(15)
             fig = px.bar(
                 top15,
                 x=prod_col,
@@ -256,7 +409,7 @@ with tab_plant:
     else:
         st.dataframe(plant_df, use_container_width=True, hide_index=True)
         plant_col = plant_df.columns[0]
-        amt_cols = [c for c in plant_df.columns if "amount" in c.lower()]
+        amt_cols  = [c for c in plant_df.columns if "amount" in c.lower()]
         if amt_cols:
             fig = px.bar(
                 plant_df.sort_values(amt_cols[0], ascending=False),
@@ -274,10 +427,10 @@ with tab_plant:
 with tab_top10:
     st.subheader("Top 10 Issues")
     sections = [
-        ("Top 10 Products by Short Amount", top10.get("products_by_short_amount")),
-        ("Top 10 Products by Short Qty", top10.get("products_by_short_qty")),
-        ("Top 10 Plants by Short Amount", top10.get("plants_by_short_amount")),
-        ("Top 10 Deliveries by Short Amount", top10.get("deliveries_by_short_amount")),
+        ("Top 10 Products by Short Amount",   top10.get("products_by_short_amount")),
+        ("Top 10 Products by Short Qty",       top10.get("products_by_short_qty")),
+        ("Top 10 Plants by Short Amount",      top10.get("plants_by_short_amount")),
+        ("Top 10 Deliveries by Short Amount",  top10.get("deliveries_by_short_amount")),
     ]
     col_a, col_b = st.columns(2)
     for idx, (title, t_df) in enumerate(sections):
@@ -313,8 +466,11 @@ with tab_raw:
     st.dataframe(df_raw.head(500), use_container_width=True, hide_index=True)
 
     st.subheader("Cleaned Data Preview")
-    st.caption("Data after header detection, type conversion, fill-down, and calculated columns.")
-    st.dataframe(df_clean.head(500), use_container_width=True, hide_index=True)
+    st.caption(
+        "Filtered + sorted data after header detection, type conversion, "
+        "fill-down, and calculated columns."
+    )
+    st.dataframe(df_filtered.head(500), use_container_width=True, hide_index=True)
 
 # ── Download Report ──────────────────────────────────────────────────────────
 with tab_download:
@@ -324,11 +480,16 @@ with tab_download:
         "Instructions, Executive Summary, Clean Data, Shortage Report, "
         "Product Summary, Plant Summary, Top 10 Issues, and Raw Export Preview."
     )
+    if _active_filters:
+        st.info(
+            f"The report will reflect your active filters ({len(df_filtered):,} of "
+            f"{len(df_clean):,} rows). Clear filters in the sidebar to export all data."
+        )
 
     if st.button("Generate Excel Report", type="primary"):
         with st.spinner("Building Excel workbook..."):
             excel_bytes = generate_excel_report(
-                df_clean=df_clean,
+                df_clean=df_filtered,
                 df_raw=df_raw,
                 kpis=kpis,
                 shortage_df=shortage_df,
