@@ -20,6 +20,8 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import (
+    BILLBACK_FEE_PER_OCCURRENCE,
+    BILLBACK_REASON,
     COMPLIANT,
     MONTH_NAMES,
     PO_STATUS_CLOSED,
@@ -238,7 +240,7 @@ def build_report(
         }
     )
 
-    return {
+    sheets = {
         "Monthly Summary": summary,
         "Portal Export Data": _portal_sheet(portal),
         "SAP Export Data": _sap_sheet(sap),
@@ -253,6 +255,8 @@ def build_report(
         "Supplier Summary": _supplier_summary(sap_unique),
         "Warehouse Summary": _warehouse_summary(sap_unique),
     }
+    sheets.update(_billback_sheets(missing))
+    return sheets
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +293,102 @@ def _processing_review_status(row) -> str:
     if not row["Has Inbound"] and row["Portal Match"]:
         return "Processing — Portal file but no SAP inbound"
     return "Processing — Pending inbound and portal file"
+
+
+_ILLEGAL_SHEET_CHARS = set(r":\/?*[]")
+
+
+def _billback_sheet_name(vendor_name: str, vendor_number: str, used: set) -> str:
+    """Return a unique, Excel-legal bill-back sheet name (<=31 chars).
+
+    Prefixes with 'BB-' so all bill-back tabs group together. Falls back to the
+    vendor number, then 'Unknown Supplier', when the name is blank or reduces to
+    nothing after illegal characters are stripped. Collisions against names
+    already in `used` get a numeric suffix. Mutates `used`.
+    """
+    def _clean(value: str) -> str:
+        stripped = "".join(
+            " " if c in _ILLEGAL_SHEET_CHARS else c for c in (value or "")
+        )
+        return " ".join(stripped.split())  # collapse whitespace runs
+
+    base = _clean(vendor_name) or _clean(vendor_number) or "Unknown Supplier"
+
+    name = ("BB-" + base)[:31]
+    if name in used:
+        i = 2
+        while True:
+            suffix = f"-{i}"
+            name = ("BB-" + base)[: 31 - len(suffix)] + suffix
+            if name not in used:
+                break
+            i += 1
+    used.add(name)
+    return name
+
+
+def _billback_supplier_tab(rows: pd.DataFrame) -> pd.DataFrame:
+    """One supplier's bill-back tab: billable POs + a TOTAL row."""
+    tab = pd.DataFrame(
+        {
+            "PO Number": rows["PO Number"].astype(str).values,
+            "Warehouse": rows["Warehouse"].values,
+            "PO Status": rows["PO Status"].values,
+            "Appointment Date": rows["Appointment Date"].values,
+            "Delivery Date": rows["Delivery Date"].values,
+            "Inbound Delivery": rows["Inbound Delivery"].values,
+            "Charge Reason": BILLBACK_REASON,
+            "Charge (USD)": BILLBACK_FEE_PER_OCCURRENCE,
+        }
+    )
+    n = len(tab)
+    total = {c: "" for c in tab.columns}
+    total["PO Number"] = f"TOTAL — {n} occurrences"
+    total["Charge (USD)"] = n * BILLBACK_FEE_PER_OCCURRENCE
+    return pd.concat([tab, pd.DataFrame([total])], ignore_index=True)
+
+
+def _billback_sheets(missing: pd.DataFrame) -> dict:
+    """Build {sheet_name: tab} for every supplier with never-uploaded POs.
+
+    Only rows whose portal file was never submitted are billed; rows with an
+    Invalid (rejected) upload are excluded. Suppliers are ordered by occurrence
+    count descending so the biggest offenders' tabs come first.
+    """
+    if missing is None or missing.empty:
+        return {}
+
+    billable = missing
+    if "Portal Invalid Match" in billable.columns:
+        billable = billable[~billable["Portal Invalid Match"].fillna(False)]
+    billable = billable.copy()
+    if billable.empty:
+        return {}
+
+    vnum = billable["Vendor Number"].fillna("").astype(str).str.strip()
+    vname = billable["Vendor Name"].fillna("").astype(str).str.strip()
+    key = vnum.where(vnum != "", vname)
+    key = key.where(key != "", "Unknown Supplier")
+    billable = billable.assign(__vkey=key.values, __vname=vname.values)
+
+    # Stable sort so suppliers tied on occurrence count keep a reproducible
+    # (alphabetical, from groupby) order across monthly runs.
+    order = (
+        billable.groupby("__vkey").size()
+        .sort_values(ascending=False, kind="stable")
+        .index.tolist()
+    )
+
+    used: set = set()
+    sheets: dict = {}
+    for vkey in order:
+        rows = billable[billable["__vkey"] == vkey]
+        # __vkey is the vendor number, or the vendor name if no number, or
+        # "Unknown Supplier"; fall back to it when no vendor name is present.
+        display_name = next((n for n in rows["__vname"] if n), str(vkey))
+        sheet_name = _billback_sheet_name(display_name, str(vkey), used)
+        sheets[sheet_name] = _billback_supplier_tab(rows)
+    return sheets
 
 
 # ---------------------------------------------------------------------------
