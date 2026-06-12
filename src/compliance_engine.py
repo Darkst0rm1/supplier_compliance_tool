@@ -291,6 +291,37 @@ def _processing_review_status(row) -> str:
     return "Processing — Pending inbound and portal file"
 
 
+_ILLEGAL_SHEET_CHARS = set(r":\/?*[]")
+
+
+def _billback_sheet_name(vendor_name: str, vendor_number: str, used: set) -> str:
+    """Return a unique, Excel-legal bill-back sheet name (<=31 chars).
+
+    Prefixes with 'BB-' so all bill-back tabs group together. Falls back to the
+    vendor number, then 'Unknown Supplier', when the name is blank. Collisions
+    against names already in `used` get a numeric suffix. Mutates `used`.
+    """
+    base = (vendor_name or "").strip()
+    if not base:
+        base = (vendor_number or "").strip()
+    if not base:
+        base = "Unknown Supplier"
+    base = "".join(" " if c in _ILLEGAL_SHEET_CHARS else c for c in base)
+    base = " ".join(base.split())  # collapse runs of whitespace
+
+    name = ("BB-" + base)[:31]
+    if name in used:
+        i = 2
+        while True:
+            suffix = f"-{i}"
+            name = ("BB-" + base)[: 31 - len(suffix)] + suffix
+            if name not in used:
+                break
+            i += 1
+    used.add(name)
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Sheet column selectors
 # ---------------------------------------------------------------------------
