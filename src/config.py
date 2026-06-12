@@ -79,6 +79,12 @@ PORTAL_VALID_STATUSES = {
 }
 PORTAL_PENDING_STATUSES = {PORTAL_STATUS_SUBMITTED}
 
+# Bill-back: suppliers are charged a flat fee for every inbound PO whose
+# documentation was never uploaded to the portal (a "Missing Inbound Document").
+# Uploaded-but-Invalid POs are NOT billed -- the supplier attempted.
+BILLBACK_FEE_PER_OCCURRENCE = 200          # USD per missing inbound document
+BILLBACK_REASON = "Missing Inbound Document"
+
 # SAP Inbound Delivery Status codes (real export uses C / A / B; spec said
 # "P" for processing but actual SAP exports use "B"). Both are recognized.
 PO_STATUS_CLOSED = "C"
