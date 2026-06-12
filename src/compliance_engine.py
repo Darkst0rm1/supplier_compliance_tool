@@ -20,6 +20,8 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import (
+    BILLBACK_FEE_PER_OCCURRENCE,
+    BILLBACK_REASON,
     COMPLIANT,
     MONTH_NAMES,
     PO_STATUS_CLOSED,
@@ -321,6 +323,27 @@ def _billback_sheet_name(vendor_name: str, vendor_number: str, used: set) -> str
             i += 1
     used.add(name)
     return name
+
+
+def _billback_supplier_tab(rows: pd.DataFrame) -> pd.DataFrame:
+    """One supplier's bill-back tab: billable POs + a TOTAL row."""
+    tab = pd.DataFrame(
+        {
+            "PO Number": rows["PO Number"].astype(str).values,
+            "Warehouse": rows["Warehouse"].values,
+            "PO Status": rows["PO Status"].values,
+            "Appointment Date": rows["Appointment Date"].values,
+            "Delivery Date": rows["Delivery Date"].values,
+            "Inbound Delivery": rows["Inbound Delivery"].values,
+            "Charge Reason": BILLBACK_REASON,
+            "Charge (USD)": BILLBACK_FEE_PER_OCCURRENCE,
+        }
+    )
+    n = len(tab)
+    total = {c: "" for c in tab.columns}
+    total["PO Number"] = f"TOTAL — {n} occurrences"
+    total["Charge (USD)"] = n * BILLBACK_FEE_PER_OCCURRENCE
+    return pd.concat([tab, pd.DataFrame([total])], ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
