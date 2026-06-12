@@ -298,16 +298,17 @@ def _billback_sheet_name(vendor_name: str, vendor_number: str, used: set) -> str
     """Return a unique, Excel-legal bill-back sheet name (<=31 chars).
 
     Prefixes with 'BB-' so all bill-back tabs group together. Falls back to the
-    vendor number, then 'Unknown Supplier', when the name is blank. Collisions
-    against names already in `used` get a numeric suffix. Mutates `used`.
+    vendor number, then 'Unknown Supplier', when the name is blank or reduces to
+    nothing after illegal characters are stripped. Collisions against names
+    already in `used` get a numeric suffix. Mutates `used`.
     """
-    base = (vendor_name or "").strip()
-    if not base:
-        base = (vendor_number or "").strip()
-    if not base:
-        base = "Unknown Supplier"
-    base = "".join(" " if c in _ILLEGAL_SHEET_CHARS else c for c in base)
-    base = " ".join(base.split())  # collapse runs of whitespace
+    def _clean(value: str) -> str:
+        stripped = "".join(
+            " " if c in _ILLEGAL_SHEET_CHARS else c for c in (value or "")
+        )
+        return " ".join(stripped.split())  # collapse whitespace runs
+
+    base = _clean(vendor_name) or _clean(vendor_number) or "Unknown Supplier"
 
     name = ("BB-" + base)[:31]
     if name in used:

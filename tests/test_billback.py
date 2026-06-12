@@ -34,3 +34,9 @@ def test_sheet_name_falls_back_to_number_then_unknown():
     used = set()
     assert _billback_sheet_name("", "9999", used) == "BB-9999"
     assert _billback_sheet_name("", "", used) == "BB-Unknown Supplier"
+
+
+def test_sheet_name_falls_back_when_name_is_all_illegal_chars():
+    used = set()
+    # vendor_name is non-empty but all illegal chars -> must use vendor_number
+    assert _billback_sheet_name("///", "9999", used) == "BB-9999"
