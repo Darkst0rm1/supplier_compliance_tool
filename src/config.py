@@ -62,14 +62,21 @@ PORTAL_COLUMN_ALIASES = {
 
 # File Status semantics:
 #   Approved   -> file was reviewed and accepted by TOL
+#   Received   -> file received/accepted by TOL (counts as compliant, like Approved)
 #   Submitted  -> uploaded, awaiting TOL review (still counts as compliant
 #                 because the supplier did their part on time)
 #   Invalid    -> uploaded but rejected by TOL (does NOT count as compliant)
 #   (blank)    -> back-compat: treat as Approved
 PORTAL_STATUS_APPROVED = "Approved"
+PORTAL_STATUS_RECEIVED = "Received"
 PORTAL_STATUS_SUBMITTED = "Submitted"
 PORTAL_STATUS_INVALID = "Invalid"
-PORTAL_VALID_STATUSES = {PORTAL_STATUS_APPROVED, PORTAL_STATUS_SUBMITTED, ""}
+PORTAL_VALID_STATUSES = {
+    PORTAL_STATUS_APPROVED,
+    PORTAL_STATUS_RECEIVED,
+    PORTAL_STATUS_SUBMITTED,
+    "",
+}
 PORTAL_PENDING_STATUSES = {PORTAL_STATUS_SUBMITTED}
 
 # SAP Inbound Delivery Status codes (real export uses C / A / B; spec said
