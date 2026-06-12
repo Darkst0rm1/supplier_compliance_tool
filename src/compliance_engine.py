@@ -240,7 +240,7 @@ def build_report(
         }
     )
 
-    return {
+    sheets = {
         "Monthly Summary": summary,
         "Portal Export Data": _portal_sheet(portal),
         "SAP Export Data": _sap_sheet(sap),
@@ -255,6 +255,8 @@ def build_report(
         "Supplier Summary": _supplier_summary(sap_unique),
         "Warehouse Summary": _warehouse_summary(sap_unique),
     }
+    sheets.update(_billback_sheets(missing))
+    return sheets
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +346,43 @@ def _billback_supplier_tab(rows: pd.DataFrame) -> pd.DataFrame:
     total["PO Number"] = f"TOTAL — {n} occurrences"
     total["Charge (USD)"] = n * BILLBACK_FEE_PER_OCCURRENCE
     return pd.concat([tab, pd.DataFrame([total])], ignore_index=True)
+
+
+def _billback_sheets(missing: pd.DataFrame) -> dict:
+    """Build {sheet_name: tab} for every supplier with never-uploaded POs.
+
+    Only rows whose portal file was never submitted are billed; rows with an
+    Invalid (rejected) upload are excluded. Suppliers are ordered by occurrence
+    count descending so the biggest offenders' tabs come first.
+    """
+    if missing is None or missing.empty:
+        return {}
+
+    billable = missing
+    if "Portal Invalid Match" in billable.columns:
+        billable = billable[~billable["Portal Invalid Match"].fillna(False)]
+    billable = billable.copy()
+    if billable.empty:
+        return {}
+
+    vnum = billable["Vendor Number"].fillna("").astype(str).str.strip()
+    vname = billable["Vendor Name"].fillna("").astype(str).str.strip()
+    key = vnum.where(vnum != "", vname)
+    key = key.where(key != "", "Unknown Supplier")
+    billable = billable.assign(__vkey=key.values, __vname=vname.values)
+
+    order = (
+        billable.groupby("__vkey").size().sort_values(ascending=False).index.tolist()
+    )
+
+    used: set = set()
+    sheets: dict = {}
+    for vkey in order:
+        rows = billable[billable["__vkey"] == vkey]
+        display_name = next((n for n in rows["__vname"] if n), str(vkey))
+        sheet_name = _billback_sheet_name(display_name, str(vkey), used)
+        sheets[sheet_name] = _billback_supplier_tab(rows)
+    return sheets
 
 
 # ---------------------------------------------------------------------------
