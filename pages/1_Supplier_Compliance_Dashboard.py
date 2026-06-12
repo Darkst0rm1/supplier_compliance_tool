@@ -91,6 +91,20 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
     m3.metric("Inbound Missing Portal", summary["SAP Inbound POs Missing Portal File"])
     m4.metric("Compliance %", summary["Compliance Percentage"])
 
+    billback_tabs = {k: v for k, v in sheets.items() if k.startswith("BB-")}
+    if billback_tabs:
+        total_charge = sum(
+            int(tab.iloc[-1]["Charge (USD)"]) for tab in billback_tabs.values()
+        )
+        st.subheader("Non-Compliant Bill-Back")
+        st.caption(
+            f"{len(billback_tabs)} supplier(s) billed for missing inbound "
+            f"documents — total **${total_charge:,}**. One tab per supplier is "
+            "included in the Excel download (sheets prefixed `BB-`)."
+        )
+    else:
+        st.caption("No bill-back: every inbound PO had its document uploaded.")
+
     with st.spinner("Writing Excel workbook..."):
         xlsx_bytes = generate_workbook(sheets)
 
