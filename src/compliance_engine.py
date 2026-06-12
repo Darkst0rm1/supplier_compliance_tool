@@ -34,6 +34,34 @@ from .config import (
 from .normalizer import has_value
 
 
+def _map_lookup(keys: pd.Series, lookup: pd.Series) -> pd.Series:
+    """Map `keys` through a `lookup` Series (its index -> its values).
+
+    Returns a value-or-missing Series aligned to `keys`. Guards the empty-lookup
+    case: pandas 3.0 coerces an empty mapper to float64, which then raises
+    "Cannot cast DatetimeArray to dtype float64" when the lookup holds datetimes
+    (e.g. an Upload Date lookup built from zero Invalid uploads). Returning an
+    all-missing Series of the lookup's own dtype keeps downstream .fillna chains
+    and Excel output identical to a normal miss.
+    """
+    if lookup.empty:
+        return pd.Series(index=keys.index, dtype=lookup.dtype)
+    return keys.map(lookup)
+
+
+def _apply_rows(df: pd.DataFrame, func) -> pd.Series:
+    """Row-wise apply (axis=1) that is safe on empty frames.
+
+    pandas 3.0 returns an empty *DataFrame* (mirroring the input's columns) from
+    `df.apply(func, axis=1)` when the frame has no rows, which then can't be
+    assigned to a single column. Return an empty object Series in that case so
+    the caller's `df["col"] = _apply_rows(df, func)` always works.
+    """
+    if df.empty:
+        return pd.Series(index=df.index, dtype=object)
+    return df.apply(func, axis=1)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -105,24 +133,24 @@ def build_report(
     # Annotate every SAP row with portal-side info.
     sap_valid["Portal Match"] = sap_valid["Normalized PO Number"].isin(portal_valid_pos)
     sap_valid["Portal Invalid Match"] = sap_valid["Normalized PO Number"].isin(portal_invalid_pos)
+    keys = sap_valid["Normalized PO Number"]
     sap_valid["Portal Supplier Name"] = (
-        sap_valid["Normalized PO Number"].map(valid_lookup["Supplier Name"])
-        .fillna(sap_valid["Normalized PO Number"].map(invalid_lookup["Supplier Name"]))
+        _map_lookup(keys, valid_lookup["Supplier Name"])
+        .fillna(_map_lookup(keys, invalid_lookup["Supplier Name"]))
         .fillna("")
     )
     sap_valid["Upload Date"] = (
-        sap_valid["Normalized PO Number"].map(valid_lookup["Upload Date"])
-        .fillna(sap_valid["Normalized PO Number"].map(invalid_lookup["Upload Date"]))
+        _map_lookup(keys, valid_lookup["Upload Date"])
+        .fillna(_map_lookup(keys, invalid_lookup["Upload Date"]))
     )
     sap_valid["Portal File Status"] = (
-        sap_valid["Normalized PO Number"].map(valid_lookup["File Status"])
-        .fillna("")
+        _map_lookup(keys, valid_lookup["File Status"]).fillna("")
     )
     sap_valid.loc[sap_valid["Portal Invalid Match"], "Portal File Status"] = (
         PORTAL_STATUS_INVALID
     )
     sap_valid["Invalid Reason"] = (
-        sap_valid["Normalized PO Number"].map(invalid_lookup["Invalid Comment"]).fillna("")
+        _map_lookup(keys, invalid_lookup["Invalid Comment"]).fillna("")
     )
 
     # One row per unique PO for the per-PO sheets.
@@ -138,7 +166,7 @@ def build_report(
     missing = sap_unique[
         sap_unique["Has Inbound"] & ~sap_unique["Portal Match"]
     ].copy()
-    missing["Issue"] = missing.apply(_missing_issue_text, axis=1)
+    missing["Issue"] = _apply_rows(missing, _missing_issue_text)
 
     # Portal upload present but SAP has no inbound delivery.
     portal_no_inbound = sap_unique[
@@ -155,12 +183,12 @@ def build_report(
     not_in_sap["Issue"] = "Portal PO not found in SAP export."
 
     closed = sap_unique[sap_unique["PO Status"] == PO_STATUS_CLOSED].copy()
-    closed["Review Status"] = closed.apply(_closed_review_status, axis=1)
+    closed["Review Status"] = _apply_rows(closed, _closed_review_status)
 
     processing = sap_unique[
         sap_unique["PO Status"].isin(PO_STATUS_PROCESSING_CODES)
     ].copy()
-    processing["Review Status"] = processing.apply(_processing_review_status, axis=1)
+    processing["Review Status"] = _apply_rows(processing, _processing_review_status)
 
     # POs in scope but with no inbound delivery yet.
     no_inbound_yet = sap_unique[~sap_unique["Has Inbound"]].copy()
