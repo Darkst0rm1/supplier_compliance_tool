@@ -371,14 +371,20 @@ def _billback_sheets(missing: pd.DataFrame) -> dict:
     key = key.where(key != "", "Unknown Supplier")
     billable = billable.assign(__vkey=key.values, __vname=vname.values)
 
+    # Stable sort so suppliers tied on occurrence count keep a reproducible
+    # (alphabetical, from groupby) order across monthly runs.
     order = (
-        billable.groupby("__vkey").size().sort_values(ascending=False).index.tolist()
+        billable.groupby("__vkey").size()
+        .sort_values(ascending=False, kind="stable")
+        .index.tolist()
     )
 
     used: set = set()
     sheets: dict = {}
     for vkey in order:
         rows = billable[billable["__vkey"] == vkey]
+        # __vkey is the vendor number, or the vendor name if no number, or
+        # "Unknown Supplier"; fall back to it when no vendor name is present.
         display_name = next((n for n in rows["__vname"] if n), str(vkey))
         sheet_name = _billback_sheet_name(display_name, str(vkey), used)
         sheets[sheet_name] = _billback_supplier_tab(rows)
