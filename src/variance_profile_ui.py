@@ -228,6 +228,8 @@ def render_variance_profile_panel(
 
     version = st.session_state.get(ver_key, 0)
 
+    select_key = _ss(prefix, "select")
+
     # Apply a queued load: seed widget state from the target profile.
     pending_id = st.session_state.pop(pending_key, None)
     if pending_id is not None:
@@ -236,6 +238,9 @@ def render_variance_profile_panel(
         except ProfileError:
             target = store.get_default_profile(profile_type)
         st.session_state[active_key] = target.id
+        # Keep the dropdown's own state in sync with the programmatic change,
+        # otherwise the keyed selectbox would keep showing the previous choice.
+        st.session_state[select_key] = target.id
         seed_session_state(prefix, version, specs, target.filters)
 
     # Resolve the active profile (may have been deleted out from under us).
@@ -259,22 +264,24 @@ def render_variance_profile_panel(
 
     ids = [p.id for p in profiles]
     labels = {p.id: _label(p) for p in profiles}
-    try:
-        idx = ids.index(active.id)
-    except ValueError:
-        idx = 0
 
-    chosen_id = ui.selectbox(
+    # Selection is driven through the widget's session_state key (not `index`,
+    # which Streamlit ignores once a keyed widget has stored state). Sync the
+    # key to the active profile and guard against a stale/deleted id.
+    if st.session_state.get(select_key) not in ids:
+        st.session_state[select_key] = active.id
+
+    def _on_select_change() -> None:
+        _request_load(prefix, st.session_state[select_key])
+
+    ui.selectbox(
         "Variance Profile",
         ids,
-        index=idx,
         format_func=lambda i: labels.get(i, str(i)),
-        key=_ss(prefix, "select"),
+        key=select_key,
+        on_change=_on_select_change,
         label_visibility="collapsed",
     )
-    if chosen_id != active.id:
-        _request_load(prefix, chosen_id)
-        st.rerun()
 
     # status line
     bits = []
