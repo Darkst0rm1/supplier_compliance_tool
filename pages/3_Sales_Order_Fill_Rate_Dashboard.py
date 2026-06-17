@@ -18,14 +18,6 @@ from src.sales_order_engine import (
     build_unconfirmed_report,
     generate_excel_report,
     load_sales_order,
-    reclassify_priority,
-)
-from src.variance_profiles import PROFILE_TYPE_SALES_ORDER
-from src.variance_profile_ui import (
-    FieldSpec,
-    get_store,
-    render_variance_profile_panel,
-    versioned_key,
 )
 
 st.title("Sales Order Fill Rate Dashboard")
@@ -44,6 +36,14 @@ with st.sidebar:
         type=["xlsx", "xls"],
         key="so_upload",
     )
+    threshold = st.number_input(
+        "High Priority Dollar Threshold ($)",
+        min_value=0.0,
+        value=500.0,
+        step=100.0,
+        help="Lines with Unconfirmed Demand Amount >= this value are marked High Priority.",
+    )
+    st.markdown("---")
     st.caption(
         "**Note:** The app automatically detects the real header row and "
         "skips SAP technical rows above the data."
@@ -54,17 +54,16 @@ if uploaded_file is None:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Load & process (cached per file; Priority threshold applied afterwards so it
-# can be driven by a saved Variance Profile without re-reading the file)
+# Load & process
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def _process(file_bytes: bytes):
-    return load_sales_order(io.BytesIO(file_bytes), 0.0)
+def _process(file_bytes: bytes, threshold: float):
+    return load_sales_order(io.BytesIO(file_bytes), threshold)
 
 
 with st.spinner("Reading and cleaning data — please wait..."):
     try:
-        df_clean, df_raw = _process(uploaded_file.getvalue())
+        df_clean, df_raw = _process(uploaded_file.getvalue(), threshold)
     except Exception as exc:
         st.error(f"Could not read file: {exc}")
         st.stop()
@@ -74,7 +73,7 @@ if df_clean.empty:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Saved Variance Profiles + filter panel (sidebar)
+# Filter panel (sidebar)
 # ---------------------------------------------------------------------------
 def _opts(col: str) -> list:
     if col not in df_clean.columns:
@@ -91,59 +90,36 @@ SORT_OPTIONS = [
     "Plant",
 ]
 
-# Priority is reclassified from the (threshold-dependent) High/Medium/Low domain,
-# so its filter options are fixed rather than derived from the loaded data.
-PRIORITY_LEVELS = ["High Priority", "Medium Priority", "Low Priority"]
-
 has_date = "requested_delivery_date" in df_clean.columns
 if has_date:
-    _valid_dates = df_clean["requested_delivery_date"].dropna()
-    min_date = _valid_dates.min().date() if not _valid_dates.empty else date.today()
-    max_date = _valid_dates.max().date() if not _valid_dates.empty else date.today()
+    valid_dates = df_clean["requested_delivery_date"].dropna()
+    min_date = valid_dates.min().date() if not valid_dates.empty else date.today()
+    max_date = valid_dates.max().date() if not valid_dates.empty else date.today()
 else:
     min_date = max_date = date.today()
 
-# Declarative mapping: each widget <-> canonical filter key.
-_specs = [
-    FieldSpec("customers", "account", "multiselect", lambda: _opts("key_account")),
-    FieldSpec("warehouses", "plant", "multiselect", lambda: _opts("plant")),
-    FieldSpec("products", "product", "multiselect", lambda: _opts("product")),
-    FieldSpec("sales_order_numbers", "so", "multiselect", lambda: _opts("sales_order")),
-    FieldSpec("extra.cdm", "cdm", "multiselect", lambda: _opts("cdm_name")),
-    FieldSpec("statuses", "status", "multiselect", lambda: _opts("Demand Status")),
-    FieldSpec("variance_types", "priority", "multiselect", lambda: PRIORITY_LEVELS),
-    FieldSpec("variance_amount_threshold", "threshold", "number", default=500.0),
-    FieldSpec("date_range", "date", "daterange", lambda: (min_date, max_date)),
-    FieldSpec("sort_field", "sort", "select", lambda: SORT_OPTIONS),
-    FieldSpec("visible_columns", "cols", "columns", lambda: list(df_clean.columns)),
-]
-
-_store = get_store()
+# Use a session-state counter to reset widget keys on demand.
+if "sov_filter_version" not in st.session_state:
+    st.session_state["sov_filter_version"] = 0
+_v = st.session_state["sov_filter_version"]
 
 with st.sidebar:
     st.markdown("---")
-    active_profile, _v = render_variance_profile_panel(
-        _store, PROFILE_TYPE_SALES_ORDER, "sov", _specs
-    )
-
-    st.markdown("---")
     st.header("Filters")
 
-    def vkey(suffix: str) -> str:
-        return versioned_key("sov", suffix, _v)
-
-    sel_account = st.multiselect("Key Account", _opts("key_account"), key=vkey("account"))
-    sel_plant = st.multiselect("Plant", _opts("plant"), key=vkey("plant"))
-    sel_product = st.multiselect("Product", _opts("product"), key=vkey("product"))
-    sel_so = st.multiselect("Sales Order", _opts("sales_order"), key=vkey("so"))
-    sel_cdm = st.multiselect("CDM", _opts("cdm_name"), key=vkey("cdm"))
-    sel_status = st.multiselect("Demand Status", _opts("Demand Status"), key=vkey("status"))
-    sel_priority = st.multiselect("Priority", PRIORITY_LEVELS, key=vkey("priority"))
+    sel_account = st.multiselect("Key Account", _opts("key_account"), key=f"sov_account_{_v}")
+    sel_plant = st.multiselect("Plant", _opts("plant"), key=f"sov_plant_{_v}")
+    sel_product = st.multiselect("Product", _opts("product"), key=f"sov_product_{_v}")
+    sel_so = st.multiselect("Sales Order", _opts("sales_order"), key=f"sov_so_{_v}")
+    sel_cdm = st.multiselect("CDM", _opts("cdm_name"), key=f"sov_cdm_{_v}")
+    sel_status = st.multiselect("Demand Status", _opts("Demand Status"), key=f"sov_status_{_v}")
+    sel_priority = st.multiselect("Priority", _opts("Priority"), key=f"sov_priority_{_v}")
 
     if has_date:
         date_range = st.date_input(
             "Requested Delivery Date",
-            min_value=min_date, max_value=max_date, key=vkey("date"),
+            value=(min_date, max_date),
+            min_value=min_date, max_value=max_date, key=f"sov_date_{_v}",
         )
         if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
             sel_date_start, sel_date_end = date_range
@@ -152,23 +128,12 @@ with st.sidebar:
     else:
         sel_date_start = sel_date_end = None
 
-    threshold = st.number_input(
-        "High Priority Dollar Threshold ($)",
-        min_value=0.0, step=100.0, key=vkey("threshold"),
-        help="Lines with Unconfirmed Demand Amount >= this value are marked High Priority.",
-    )
-
     st.markdown("---")
-    sort_by = st.selectbox("Sort By", SORT_OPTIONS, key=vkey("sort"))
+    sort_by = st.selectbox("Sort By", SORT_OPTIONS, index=0, key=f"sov_sort_{_v}")
 
-    sel_columns = st.multiselect(
-        "Visible Columns (tables)", list(df_clean.columns), key=vkey("cols"),
-        help="Columns shown in the data tables and the Excel 'Clean Data' sheet.",
-    )
-
-# Apply the Priority threshold from the active profile / widget.
-# Copy so we never mutate the cached dataframe returned by _process().
-df_clean = reclassify_priority(df_clean.copy(), float(threshold))
+    if st.button("Reset Filters", key="sov_reset"):
+        st.session_state["sov_filter_version"] += 1
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Apply filters -> df_filtered
@@ -213,14 +178,6 @@ if _sort_col in df_filtered.columns:
     ).reset_index(drop=True)
 
 
-def _apply_visible(df):
-    """Restrict a dataframe to chosen visible columns (table views only)."""
-    if not sel_columns:
-        return df
-    cols = [c for c in sel_columns if c in df.columns]
-    return df[cols] if cols else df
-
-
 # ---------------------------------------------------------------------------
 # Rebuild all summaries from filtered data
 # ---------------------------------------------------------------------------
@@ -239,7 +196,7 @@ _active = any([
 if _active:
     st.info(
         f"Filters active — showing **{len(df_filtered):,}** of **{len(df_clean):,}** rows. "
-        "Use the **Variance Profile** panel in the sidebar to reset."
+        "Use **Reset Filters** in the sidebar to clear."
     )
 st.success(
     f"Loaded **{len(df_filtered):,}** rows — "
@@ -409,6 +366,7 @@ with tab_exec:
 # ── Unconfirmed Demand Report ─────────────────────────────────────────────────
 with tab_unc:
     st.subheader(f"Unconfirmed Demand Report — {len(unconfirmed_df):,} problem lines")
+
     if unconfirmed_df.empty:
         st.success("No unconfirmed demand found in this dataset.")
     else:
@@ -550,7 +508,7 @@ with tab_raw:
 
     st.subheader("Cleaned Data Preview")
     st.caption("Filtered + sorted data after header detection, type conversion, fill-down, and calculated columns.")
-    st.dataframe(_apply_visible(df_filtered).head(500), use_container_width=True, hide_index=True)
+    st.dataframe(df_filtered.head(500), use_container_width=True, hide_index=True)
 
 # ── Download Report ───────────────────────────────────────────────────────────
 with tab_dl:
@@ -565,7 +523,7 @@ with tab_dl:
     if st.button("Generate Excel Report", type="primary"):
         with st.spinner("Building Excel workbook..."):
             excel_bytes = generate_excel_report(
-                df_clean=_apply_visible(df_filtered),
+                df_clean=df_filtered,
                 df_raw=df_raw,
                 kpis=kpis,
                 unconfirmed_df=unconfirmed_df,

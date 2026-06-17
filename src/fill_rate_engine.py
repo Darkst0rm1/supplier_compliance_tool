@@ -289,26 +289,6 @@ def _add_calculated_columns(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     return df
 
 
-def reclassify_priority(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Recompute only the Priority column for a new dollar threshold.
-
-    Lets the High-Priority threshold be a post-load setting (driven by a saved
-    Variance Profile) without re-reading the file. Returns the same dataframe.
-    """
-    short_qty = df.get("short_quantity", pd.Series(0, index=df.index)).fillna(0)
-    if "total_short_amount" in df.columns:
-        priority_amt = df["total_short_amount"].fillna(0)
-    else:
-        priority_amt = df.get("short_amount", pd.Series(0, index=df.index)).fillna(0)
-
-    conditions = [
-        priority_amt >= threshold,
-        (short_qty > 0) | (priority_amt > 0),
-    ]
-    df["Priority"] = np.select(conditions, ["High Priority", "Medium Priority"], default="Low Priority")
-    return df
-
-
 # ---------------------------------------------------------------------------
 # KPI builder
 # ---------------------------------------------------------------------------
