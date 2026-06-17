@@ -127,7 +127,23 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Rename columns to canonical snake_case names; keep unmatched as-is."""
     rename_map: dict[str, str] = {}
     seen: set[str] = set()
+
+    # Product Group arrives as a code+name pair, both literally headed
+    # "Product Group" (pandas dedups the second to "Product Group.1").
+    # BEx exports key first then text, so first = code, second = name.
+    # Handle it explicitly because "product group" contains the substring
+    # "product" and would otherwise collide with the `product` keyword.
+    pg_cols = [c for c in df.columns if _normalize_col(c).startswith("product group")]
+    if pg_cols:
+        rename_map[pg_cols[0]] = "product_group_code"
+        seen.add("product_group_code")
+        if len(pg_cols) > 1:
+            rename_map[pg_cols[1]] = "product_group_name"
+            seen.add("product_group_name")
+
     for col in df.columns:
+        if col in rename_map:
+            continue
         key = _match_column(str(col))
         if key and key not in seen:
             rename_map[col] = key
@@ -208,7 +224,8 @@ def load_fill_rate(
     df = normalize_columns(df_raw.copy())
 
     # fill-down SAP merged-cell pattern
-    for col in ["plant", "product", "sales_order", "outbound_delivery"]:
+    for col in ["plant", "product", "sales_order", "outbound_delivery",
+                "product_group_code", "product_group_name"]:
         if col in df.columns:
             df[col] = df[col].ffill()
 
@@ -269,6 +286,26 @@ def _add_calculated_columns(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     choices = ["High Priority", "Medium Priority"]
     df["Priority"] = np.select(conditions, choices, default="Low Priority")
 
+    return df
+
+
+def reclassify_priority(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Recompute only the Priority column for a new dollar threshold.
+
+    Lets the High-Priority threshold be a post-load setting (driven by a saved
+    Variance Profile) without re-reading the file. Returns the same dataframe.
+    """
+    short_qty = df.get("short_quantity", pd.Series(0, index=df.index)).fillna(0)
+    if "total_short_amount" in df.columns:
+        priority_amt = df["total_short_amount"].fillna(0)
+    else:
+        priority_amt = df.get("short_amount", pd.Series(0, index=df.index)).fillna(0)
+
+    conditions = [
+        priority_amt >= threshold,
+        (short_qty > 0) | (priority_amt > 0),
+    ]
+    df["Priority"] = np.select(conditions, ["High Priority", "Medium Priority"], default="Low Priority")
     return df
 
 
@@ -355,10 +392,26 @@ def build_plant_summary(df: pd.DataFrame) -> pd.DataFrame | None:
     return _group_summary(df, "plant")
 
 
+def build_product_group_summary(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Roll up by Product Group. Groups by the readable name when present,
+    otherwise the code; the first column is always labelled 'Product Group'."""
+    group_col = (
+        "product_group_name"
+        if "product_group_name" in df.columns
+        else "product_group_code"
+    )
+    result = _group_summary(df, group_col)
+    if result is not None and not result.empty:
+        result.rename(columns={result.columns[0]: "Product Group"}, inplace=True)
+    return result
+
+
 def build_top10(df: pd.DataFrame) -> dict[str, pd.DataFrame | None]:
     short_amt_src = "total_short_amount" if "total_short_amount" in df.columns else "short_amount"
 
-    def _top(group_col: str, value_col: str, label: str) -> pd.DataFrame | None:
+    pg_col = "product_group_name" if "product_group_name" in df.columns else "product_group_code"
+
+    def _top(group_col: str, value_col: str, label: str, group_label: str | None = None) -> pd.DataFrame | None:
         if group_col not in df.columns or value_col not in df.columns:
             return None
         result = (
@@ -368,14 +421,15 @@ def build_top10(df: pd.DataFrame) -> dict[str, pd.DataFrame | None]:
             .sort_values(value_col, ascending=False)
             .head(10)
         )
-        result.columns = [group_col.replace("_", " ").title(), label]
+        result.columns = [group_label or group_col.replace("_", " ").title(), label]
         return result
 
     return {
-        "products_by_short_amount":    _top("product",          short_amt_src,   "Short Amount ($)"),
-        "products_by_short_qty":       _top("product",          "short_quantity", "Short Qty"),
-        "plants_by_short_amount":      _top("plant",            short_amt_src,   "Short Amount ($)"),
-        "deliveries_by_short_amount":  _top("outbound_delivery", short_amt_src,  "Short Amount ($)"),
+        "products_by_short_amount":       _top("product",          short_amt_src,   "Short Amount ($)"),
+        "products_by_short_qty":          _top("product",          "short_quantity", "Short Qty"),
+        "product_groups_by_short_amount": _top(pg_col,             short_amt_src,   "Short Amount ($)", "Product Group"),
+        "plants_by_short_amount":         _top("plant",            short_amt_src,   "Short Amount ($)"),
+        "deliveries_by_short_amount":     _top("outbound_delivery", short_amt_src,  "Short Amount ($)"),
     }
 
 
@@ -487,6 +541,7 @@ def _instructions_sheet(ws) -> None:
         ("  • Shortage Report    — Problem rows only", False, 11, "000000"),
         ("  • Product Summary    — Aggregated by product", False, 11, "000000"),
         ("  • Plant Summary      — Aggregated by plant", False, 11, "000000"),
+        ("  • Product Grp Summary — Aggregated by product group", False, 11, "000000"),
         ("  • Top 10 Issues      — Top offenders by short amount / qty", False, 11, "000000"),
         ("  • Raw Export Preview — First 1000 rows of the original file", False, 11, "000000"),
         ("", False, 11, "000000"),
@@ -549,6 +604,7 @@ def generate_excel_report(
     plant_df: pd.DataFrame | None,
     top10: dict[str, pd.DataFrame | None],
     threshold: float,
+    product_group_df: pd.DataFrame | None = None,
 ) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
@@ -586,13 +642,22 @@ def generate_excel_report(
     else:
         ws_plant.cell(row=1, column=1, value="Plant column not found in data.")
 
+    ws_pg = wb.create_sheet("Product Group Summary")
+    if product_group_df is not None and not product_group_df.empty:
+        _write_df(ws_pg, product_group_df, start_row=1)
+        _apply_number_formats(ws_pg, product_group_df, start_row=1)
+        _autofit(ws_pg)
+    else:
+        ws_pg.cell(row=1, column=1, value="Product Group column not found in data.")
+
     ws_top = wb.create_sheet("Top 10 Issues")
     top_row = 1
     for section_title, section_df in [
-        ("Top 10 Products by Short Amount",   top10.get("products_by_short_amount")),
-        ("Top 10 Products by Short Qty",      top10.get("products_by_short_qty")),
-        ("Top 10 Plants by Short Amount",     top10.get("plants_by_short_amount")),
-        ("Top 10 Deliveries by Short Amount", top10.get("deliveries_by_short_amount")),
+        ("Top 10 Products by Short Amount",        top10.get("products_by_short_amount")),
+        ("Top 10 Products by Short Qty",           top10.get("products_by_short_qty")),
+        ("Top 10 Product Groups by Short Amount",  top10.get("product_groups_by_short_amount")),
+        ("Top 10 Plants by Short Amount",          top10.get("plants_by_short_amount")),
+        ("Top 10 Deliveries by Short Amount",      top10.get("deliveries_by_short_amount")),
     ]:
         ws_top.cell(row=top_row, column=1, value=section_title).font = Font(bold=True, size=12, color="1F4E79")
         top_row += 1

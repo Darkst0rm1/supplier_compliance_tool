@@ -222,6 +222,22 @@ def _add_calculated_columns(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     return df
 
 
+def reclassify_priority(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Recompute Priority + Action Required for a new dollar threshold.
+
+    Lets the High-Priority threshold be a post-load setting (driven by a saved
+    Variance Profile) without re-reading the file. Returns the same dataframe.
+    """
+    unconf_qty = df.get("unconfirmed_qty", pd.Series(0, index=df.index)).fillna(0)
+    unc_amt    = df.get("unconfirmed_demand_amount", pd.Series(0, index=df.index)).fillna(0)
+    conditions = [unc_amt >= threshold, unconf_qty > 0]
+    df["Priority"] = np.select(conditions, ["High Priority", "Medium Priority"], default="Low Priority")
+    df["Action Required"] = np.select(
+        conditions, ["Review with supply/planning", "Monitor"], default="No action required"
+    )
+    return df
+
+
 # ---------------------------------------------------------------------------
 # KPI builder
 # ---------------------------------------------------------------------------

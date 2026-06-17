@@ -11,11 +11,20 @@ import streamlit as st
 from src.fill_rate_engine import (
     build_kpis,
     build_plant_summary,
+    build_product_group_summary,
     build_product_summary,
     build_shortage_report,
     build_top10,
     generate_excel_report,
     load_fill_rate,
+    reclassify_priority,
+)
+from src.variance_profiles import PROFILE_TYPE_DELIVERY
+from src.variance_profile_ui import (
+    FieldSpec,
+    get_store,
+    render_variance_profile_panel,
+    versioned_key,
 )
 
 st.title("Delivery Fill Rate Dashboard")
@@ -25,7 +34,7 @@ st.caption(
 )
 
 # ---------------------------------------------------------------------------
-# Sidebar — upload + threshold
+# Sidebar — upload
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Upload & Settings")
@@ -34,14 +43,6 @@ with st.sidebar:
         type=["xlsx", "xls"],
         key="dfr_upload",
     )
-    threshold = st.number_input(
-        "High Priority Dollar Threshold ($)",
-        min_value=0.0,
-        value=1000.0,
-        step=100.0,
-        help="Lines with Short Amount >= this value are marked High Priority.",
-    )
-    st.markdown("---")
     st.caption(
         "**Note:** The app automatically detects the real header row, "
         "skips technical/blank rows, and fills down SAP merged-cell values."
@@ -52,16 +53,17 @@ if uploaded_file is None:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Load & process (cached per file + threshold)
+# Load & process (cached per file; Priority threshold applied afterwards so it
+# can be driven by a saved Variance Profile without re-reading the file)
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def _process(file_bytes: bytes, threshold: float):
-    return load_fill_rate(io.BytesIO(file_bytes), threshold)
+def _process(file_bytes: bytes):
+    return load_fill_rate(io.BytesIO(file_bytes), 0.0)
 
 
 with st.spinner("Reading and cleaning data — please wait..."):
     try:
-        df_clean, df_raw = _process(uploaded_file.getvalue(), threshold)
+        df_clean, df_raw = _process(uploaded_file.getvalue())
     except Exception as exc:
         st.error(f"Could not read file: {exc}")
         st.stop()
@@ -71,50 +73,81 @@ if df_clean.empty:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# Filter panel (sidebar, below upload)
+# Saved Variance Profiles + filter panel (sidebar)
 # ---------------------------------------------------------------------------
-# Use a session-state counter to reset widget keys on demand.
-if "dfr_filter_version" not in st.session_state:
-    st.session_state["dfr_filter_version"] = 0
+def _opts(col: str) -> list:
+    if col not in df_clean.columns:
+        return []
+    return sorted(df_clean[col].dropna().unique().tolist())
 
-_v = st.session_state["dfr_filter_version"]
+
+SORT_OPTIONS = [
+    "Highest Short Amount",
+    "Highest Short Qty",
+    "Lowest WH Fill Rate",
+    "Lowest Customer Fill Rate",
+    "Requested Delivery Date",
+    "Product",
+    "Plant",
+]
+
+# Priority is reclassified from the (threshold-dependent) High/Medium/Low domain,
+# so its filter options are fixed rather than derived from the loaded data.
+PRIORITY_LEVELS = ["High Priority", "Medium Priority", "Low Priority"]
+
+has_date = "requested_delivery_date" in df_clean.columns
+if has_date:
+    _valid_dates = df_clean["requested_delivery_date"].dropna()
+    min_date = _valid_dates.min().date() if not _valid_dates.empty else date.today()
+    max_date = _valid_dates.max().date() if not _valid_dates.empty else date.today()
+else:
+    min_date = max_date = date.today()
+
+# Declarative mapping: each widget <-> canonical filter key. Drives both
+# seeding (profile -> widgets) and collecting (widgets -> profile).
+_specs = [
+    FieldSpec("warehouses", "plant", "multiselect", lambda: _opts("plant")),
+    FieldSpec("products", "product", "multiselect", lambda: _opts("product")),
+    FieldSpec("product_groups", "pgroup", "multiselect", lambda: _opts("product_group_name")),
+    FieldSpec("delivery_numbers", "obd", "multiselect", lambda: _opts("outbound_delivery")),
+    FieldSpec("sales_order_numbers", "so", "multiselect", lambda: _opts("sales_order")),
+    FieldSpec("statuses", "status", "multiselect", lambda: _opts("Shortage Status")),
+    FieldSpec("variance_types", "priority", "multiselect", lambda: PRIORITY_LEVELS),
+    FieldSpec("extra.wh_fill_status", "wh", "multiselect", lambda: _opts("WH Fill Status")),
+    FieldSpec("extra.customer_fill_status", "cust", "multiselect", lambda: _opts("Customer Fill Status")),
+    FieldSpec("variance_amount_threshold", "threshold", "number", default=1000.0),
+    FieldSpec("date_range", "date", "daterange", lambda: (min_date, max_date)),
+    FieldSpec("sort_field", "sort", "select", lambda: SORT_OPTIONS),
+    FieldSpec("visible_columns", "cols", "columns", lambda: list(df_clean.columns)),
+]
+
+_store = get_store()
 
 with st.sidebar:
     st.markdown("---")
+    active_profile, _v = render_variance_profile_panel(
+        _store, PROFILE_TYPE_DELIVERY, "dfr", _specs
+    )
+
+    st.markdown("---")
     st.header("Filters")
 
-    def _opts(col: str) -> list:
-        if col not in df_clean.columns:
-            return []
-        return sorted(df_clean[col].dropna().unique().tolist())
+    def vkey(suffix: str) -> str:
+        return versioned_key("dfr", suffix, _v)
 
-    sel_plant = st.multiselect(
-        "Plant", _opts("plant"), key=f"dfr_plant_{_v}"
-    )
-    sel_product = st.multiselect(
-        "Product", _opts("product"), key=f"dfr_product_{_v}"
-    )
-    sel_obd = st.multiselect(
-        "Outbound Delivery", _opts("outbound_delivery"), key=f"dfr_obd_{_v}"
-    )
-    sel_so = st.multiselect(
-        "Sales Order", _opts("sales_order"), key=f"dfr_so_{_v}"
-    )
+    sel_plant = st.multiselect("Plant", _opts("plant"), key=vkey("plant"))
+    sel_product = st.multiselect("Product", _opts("product"), key=vkey("product"))
+    sel_pgroup = st.multiselect("Product Group", _opts("product_group_name"), key=vkey("pgroup"))
+    sel_obd = st.multiselect("Outbound Delivery", _opts("outbound_delivery"), key=vkey("obd"))
+    sel_so = st.multiselect("Sales Order", _opts("sales_order"), key=vkey("so"))
 
-    # Date range filter
-    has_date = "requested_delivery_date" in df_clean.columns
     if has_date:
-        valid_dates = df_clean["requested_delivery_date"].dropna()
-        min_date = valid_dates.min().date() if not valid_dates.empty else date.today()
-        max_date = valid_dates.max().date() if not valid_dates.empty else date.today()
         date_range = st.date_input(
             "Requested Delivery Date",
-            value=(min_date, max_date),
             min_value=min_date,
             max_value=max_date,
-            key=f"dfr_date_{_v}",
+            key=vkey("date"),
         )
-        # date_input returns a tuple when range mode, or single date during selection
         if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
             sel_date_start, sel_date_end = date_range
         else:
@@ -122,34 +155,31 @@ with st.sidebar:
     else:
         sel_date_start = sel_date_end = None
 
-    sel_status = st.multiselect(
-        "Shortage Status", _opts("Shortage Status"), key=f"dfr_status_{_v}"
-    )
-    sel_priority = st.multiselect(
-        "Priority", _opts("Priority"), key=f"dfr_priority_{_v}"
-    )
-    sel_wh = st.multiselect(
-        "WH Fill Status", _opts("WH Fill Status"), key=f"dfr_wh_{_v}"
-    )
-    sel_cust = st.multiselect(
-        "Customer Fill Status", _opts("Customer Fill Status"), key=f"dfr_cust_{_v}"
+    sel_status = st.multiselect("Shortage Status", _opts("Shortage Status"), key=vkey("status"))
+    sel_priority = st.multiselect("Priority", PRIORITY_LEVELS, key=vkey("priority"))
+    sel_wh = st.multiselect("WH Fill Status", _opts("WH Fill Status"), key=vkey("wh"))
+    sel_cust = st.multiselect("Customer Fill Status", _opts("Customer Fill Status"), key=vkey("cust"))
+
+    threshold = st.number_input(
+        "High Priority Dollar Threshold ($)",
+        min_value=0.0,
+        step=100.0,
+        key=vkey("threshold"),
+        help="Lines with Short Amount >= this value are marked High Priority.",
     )
 
     st.markdown("---")
-    sort_options = [
-        "Highest Short Amount",
-        "Highest Short Qty",
-        "Lowest WH Fill Rate",
-        "Lowest Customer Fill Rate",
-        "Requested Delivery Date",
-        "Product",
-        "Plant",
-    ]
-    sort_by = st.selectbox("Sort By", sort_options, index=0, key=f"dfr_sort_{_v}")
+    sort_by = st.selectbox("Sort By", SORT_OPTIONS, key=vkey("sort"))
 
-    if st.button("Reset Filters", key="dfr_reset"):
-        st.session_state["dfr_filter_version"] += 1
-        st.rerun()
+    _all_cols = list(df_clean.columns)
+    sel_columns = st.multiselect(
+        "Visible Columns (tables)", _all_cols, key=vkey("cols"),
+        help="Columns shown in the data tables and the Excel 'Clean Data' sheet.",
+    )
+
+# Apply the Priority threshold from the active profile / widget.
+# Copy so we never mutate the cached dataframe returned by _process().
+df_clean = reclassify_priority(df_clean.copy(), float(threshold))
 
 # ---------------------------------------------------------------------------
 # Apply filters to df_clean → df_filtered
@@ -160,6 +190,8 @@ if sel_plant:
     df_filtered = df_filtered[df_filtered["plant"].isin(sel_plant)]
 if sel_product:
     df_filtered = df_filtered[df_filtered["product"].isin(sel_product)]
+if sel_pgroup and "product_group_name" in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered["product_group_name"].isin(sel_pgroup)]
 if sel_obd and "outbound_delivery" in df_filtered.columns:
     df_filtered = df_filtered[df_filtered["outbound_delivery"].isin(sel_obd)]
 if sel_so and "sales_order" in df_filtered.columns:
@@ -218,11 +250,27 @@ if product_df is not None and not product_df.empty:
         product_df = product_df.sort_values(amt_cols_prod[0], ascending=False).reset_index(drop=True)
 
 plant_df   = build_plant_summary(df_filtered)
+product_group_df = build_product_group_summary(df_filtered)
+# Product group summary sorted by highest Short Amount
+if product_group_df is not None and not product_group_df.empty:
+    amt_cols_pg = [c for c in product_group_df.columns if "amount" in c.lower()]
+    if amt_cols_pg:
+        product_group_df = product_group_df.sort_values(amt_cols_pg[0], ascending=False).reset_index(drop=True)
 top10      = build_top10(df_filtered)
+
+
+def _apply_visible(df):
+    """Restrict a dataframe to the user's chosen visible columns (table views
+    only). Empty selection means show everything."""
+    if not sel_columns:
+        return df
+    cols = [c for c in sel_columns if c in df.columns]
+    return df[cols] if cols else df
+
 
 # Active filter indicator
 _active_filters = any([
-    sel_plant, sel_product, sel_obd, sel_so,
+    sel_plant, sel_product, sel_pgroup, sel_obd, sel_so,
     sel_status, sel_priority, sel_wh, sel_cust,
     (has_date and sel_date_start and sel_date_end and
      (sel_date_start != min_date if has_date else False)),
@@ -230,7 +278,7 @@ _active_filters = any([
 if _active_filters:
     st.info(
         f"Filters active — showing **{len(df_filtered):,}** of **{len(df_clean):,}** rows. "
-        "Use **Reset Filters** in the sidebar to clear."
+        "Use the **Variance Profile** panel in the sidebar to reset."
     )
     st.success(
         f"**{kpis['num_shorted_lines']:,}** shorted lines · "
@@ -250,6 +298,7 @@ else:
     tab_exec,
     tab_short,
     tab_prod,
+    tab_pgroup,
     tab_plant,
     tab_top10,
     tab_raw,
@@ -258,6 +307,7 @@ else:
     "Executive Dashboard",
     "Shortage Report",
     "Product Summary",
+    "Product Group Summary",
     "Plant Summary",
     "Top 10 Issues",
     "Raw Preview",
@@ -375,7 +425,7 @@ with tab_short:
     if shortage_df.empty:
         st.success("No shortages or fill rate issues found.")
     else:
-        st.dataframe(shortage_df, use_container_width=True, hide_index=True)
+        st.dataframe(_apply_visible(shortage_df), use_container_width=True, hide_index=True)
 
 # ── Product Summary ─────────────────────────────────────────────────────────
 with tab_prod:
@@ -395,6 +445,30 @@ with tab_prod:
                 y=amt_cols[0],
                 title="Top 15 Products by Short Amount",
                 labels={amt_cols[0]: "Short Amount ($)", prod_col: "Product"},
+                color=amt_cols[0],
+                color_continuous_scale=["#FEF3C7", "#EF4444"],
+            )
+            fig.update_layout(coloraxis_showscale=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+# ── Product Group Summary ────────────────────────────────────────────────────
+with tab_pgroup:
+    st.subheader("Product Group Summary")
+    st.caption("Grouped by Product Group · sorted by highest Short Amount.")
+    if product_group_df is None or product_group_df.empty:
+        st.info("Product Group column not found or no data to summarize.")
+    else:
+        st.dataframe(product_group_df, use_container_width=True, hide_index=True)
+        pg_col   = product_group_df.columns[0]
+        amt_cols = [c for c in product_group_df.columns if "amount" in c.lower()]
+        if amt_cols:
+            top15 = product_group_df.head(15)
+            fig = px.bar(
+                top15,
+                x=pg_col,
+                y=amt_cols[0],
+                title="Top 15 Product Groups by Short Amount",
+                labels={amt_cols[0]: "Short Amount ($)", pg_col: "Product Group"},
                 color=amt_cols[0],
                 color_continuous_scale=["#FEF3C7", "#EF4444"],
             )
@@ -427,10 +501,11 @@ with tab_plant:
 with tab_top10:
     st.subheader("Top 10 Issues")
     sections = [
-        ("Top 10 Products by Short Amount",   top10.get("products_by_short_amount")),
-        ("Top 10 Products by Short Qty",       top10.get("products_by_short_qty")),
-        ("Top 10 Plants by Short Amount",      top10.get("plants_by_short_amount")),
-        ("Top 10 Deliveries by Short Amount",  top10.get("deliveries_by_short_amount")),
+        ("Top 10 Products by Short Amount",        top10.get("products_by_short_amount")),
+        ("Top 10 Products by Short Qty",           top10.get("products_by_short_qty")),
+        ("Top 10 Product Groups by Short Amount",  top10.get("product_groups_by_short_amount")),
+        ("Top 10 Plants by Short Amount",          top10.get("plants_by_short_amount")),
+        ("Top 10 Deliveries by Short Amount",      top10.get("deliveries_by_short_amount")),
     ]
     col_a, col_b = st.columns(2)
     for idx, (title, t_df) in enumerate(sections):
@@ -470,15 +545,16 @@ with tab_raw:
         "Filtered + sorted data after header detection, type conversion, "
         "fill-down, and calculated columns."
     )
-    st.dataframe(df_filtered.head(500), use_container_width=True, hide_index=True)
+    st.dataframe(_apply_visible(df_filtered).head(500), use_container_width=True, hide_index=True)
 
 # ── Download Report ──────────────────────────────────────────────────────────
 with tab_download:
     st.subheader("Download Excel Report")
     st.markdown(
-        "Generates a fully formatted Excel workbook with 8 sheets: "
+        "Generates a fully formatted Excel workbook with 9 sheets: "
         "Instructions, Executive Summary, Clean Data, Shortage Report, "
-        "Product Summary, Plant Summary, Top 10 Issues, and Raw Export Preview."
+        "Product Summary, Plant Summary, Product Group Summary, Top 10 Issues, "
+        "and Raw Export Preview."
     )
     if _active_filters:
         st.info(
@@ -489,7 +565,7 @@ with tab_download:
     if st.button("Generate Excel Report", type="primary"):
         with st.spinner("Building Excel workbook..."):
             excel_bytes = generate_excel_report(
-                df_clean=df_filtered,
+                df_clean=_apply_visible(df_filtered),
                 df_raw=df_raw,
                 kpis=kpis,
                 shortage_df=shortage_df,
@@ -497,6 +573,7 @@ with tab_download:
                 plant_df=plant_df if plant_df is not None else pd.DataFrame(),
                 top10=top10,
                 threshold=threshold,
+                product_group_df=product_group_df if product_group_df is not None else pd.DataFrame(),
             )
         st.download_button(
             label="Download Delivery_Fill_Rate_Report.xlsx",
