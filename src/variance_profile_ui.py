@@ -344,13 +344,20 @@ def render_variance_profile_panel(
 
     # Save as new (name input + button)
     with ui.expander("➕ Save current filters as a new profile"):
-        new_name = st.text_input("Profile name", key=_ss(prefix, "new_name"),
+        # Clear the field on the run after a successful save. We must do this
+        # *before* the text_input is instantiated — Streamlit forbids writing a
+        # widget-keyed session_state value after the widget is created.
+        name_key = _ss(prefix, "new_name")
+        clear_key = _ss(prefix, "clear_new_name")
+        if st.session_state.pop(clear_key, False):
+            st.session_state[name_key] = ""
+        new_name = st.text_input("Profile name", key=name_key,
                                   placeholder="e.g. My Delivery Variance")
         if st.button("Save New Profile", key=_ss(prefix, "btn_savenew"), type="primary"):
             try:
                 created = store.create_profile(new_name, profile_type, current_filters)
                 _flash("success", f"Saved '{created.name}'.")
-                st.session_state[_ss(prefix, "new_name")] = ""
+                st.session_state[clear_key] = True
                 _request_load(prefix, created.id)
                 st.rerun()
             except ProfileError as exc:
