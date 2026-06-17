@@ -329,7 +329,9 @@ class ProfileStore:
     """Tenant- and user-scoped store for Saved Variance Profiles."""
 
     def __init__(self, db_path: str | os.PathLike | None = None, ctx: Context | None = None):
-        self.db_path = str(db_path) if db_path is not None else str(_DEFAULT_DB_PATH)
+        if db_path is None:
+            db_path = os.environ.get("SCT_PROFILE_DB") or str(_DEFAULT_DB_PATH)
+        self.db_path = str(db_path)
         if self.db_path != ":memory:":
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.ctx = ctx or get_context()

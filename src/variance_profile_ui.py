@@ -289,8 +289,14 @@ def render_variance_profile_panel(
     if active.is_default:
         bits.append("default")
     ui.caption(" · ".join(bits))
-    if dirty:
-        ui.warning("● Unsaved changes — click **Update Profile** to save.", icon="⚠️")
+    if dirty and active.is_system:
+        ui.warning(
+            "Unsaved changes. This is a read-only **system profile** — use "
+            "**Save as new profile** below (or **Duplicate**) to keep them.",
+            icon="⚠️",
+        )
+    elif dirty:
+        ui.warning("Unsaved changes — click **Update Profile** to save.", icon="⚠️")
     else:
         ui.caption("✓ No unsaved changes.")
 
@@ -349,8 +355,10 @@ def render_variance_profile_panel(
             _flash("error", str(exc))
         st.rerun()
 
-    # Save as new (name input + button)
-    with ui.expander("➕ Save current filters as a new profile"):
+    # Save as new (name input + button). Auto-open when there are unsaved
+    # changes so it's obvious how to keep them — especially on system profiles
+    # where Update is disabled.
+    with ui.expander("➕ Save current filters as a new profile", expanded=dirty):
         # Clear the field on the run after a successful save. We must do this
         # *before* the text_input is instantiated — Streamlit forbids writing a
         # widget-keyed session_state value after the widget is created.
