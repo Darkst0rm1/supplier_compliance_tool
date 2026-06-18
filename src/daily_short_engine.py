@@ -69,16 +69,29 @@ _ALIASES = {
 
 
 # ---------------------------------------------------------------------------
-# Short analyses (template) — Order-based
+# Short analyses — measured stage-to-stage (each step's gap):
+#   unconfirmed : Ordered    - Confirmed   (ordered but not confirmed)
+#   delivery    : Confirmed  - Delivered   (confirmed but no outbound delivery)
+#   invoice     : Delivered  - Invoiced    (delivered but not invoiced)
 # ---------------------------------------------------------------------------
 SHORT_DEFS: list[dict[str, str]] = [
     {"key": "unconfirmed", "label": "Unconfirmed Quantities",
-     "title": "Shorted at time of confirmation", "qty_col": COL_CONFIRMED_QTY},
-    {"key": "delivery", "label": "Shorted at Outbound Delivery",
-     "title": "Shorted at time of outbound delivery", "qty_col": COL_DELIVERY_QTY},
-    {"key": "invoice", "label": "Shorted at Invoicing",
-     "title": "Shorted at time of invoicing", "qty_col": COL_INVOICE_QTY},
+     "title": "Ordered but not confirmed",
+     "base_col": COL_ORDER_QTY, "base_label": "Ordered",
+     "fulfilled_col": COL_CONFIRMED_QTY, "fulfilled_label": "Confirmed"},
+    {"key": "delivery", "label": "Confirmed, No Outbound Delivery",
+     "title": "Confirmed but no outbound delivery created",
+     "base_col": COL_CONFIRMED_QTY, "base_label": "Confirmed",
+     "fulfilled_col": COL_DELIVERY_QTY, "fulfilled_label": "Delivered"},
+    {"key": "invoice", "label": "Delivered, Not Invoiced",
+     "title": "Outbound delivery created but not invoiced",
+     "base_col": COL_DELIVERY_QTY, "base_label": "Delivered",
+     "fulfilled_col": COL_INVOICE_QTY, "fulfilled_label": "Invoiced"},
 ]
+
+
+def _def(key: str) -> dict[str, str]:
+    return next(d for d in SHORT_DEFS if d["key"] == key)
 
 
 def _short_col(key: str) -> str:
@@ -140,12 +153,11 @@ def load_daily_short(file_obj: Any) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
 
-    # Short columns (clip at 0 — never count overdelivery as negative short).
-    order = df[COL_ORDER_QTY].fillna(0)
+    # Stage-to-stage short columns (clip at 0 — never count a gain as a short).
     for d in SHORT_DEFS:
-        qcol = d["qty_col"]
-        fulfilled = df[qcol].fillna(0) if qcol in df.columns else 0
-        df[_short_col(d["key"])] = (order - fulfilled).clip(lower=0)
+        base = df[d["base_col"]].fillna(0) if d["base_col"] in df.columns else 0
+        fulfilled = df[d["fulfilled_col"]].fillna(0) if d["fulfilled_col"] in df.columns else 0
+        df[_short_col(d["key"])] = (base - fulfilled).clip(lower=0)
 
     return df
 
@@ -169,60 +181,77 @@ def build_kpis(df: pd.DataFrame) -> dict[str, Any]:
     def _rate(num: float, den: float) -> float:
         return (num / den * 100) if den else 0.0
 
+    def _short(key: str) -> float:
+        c = _short_col(key)
+        return float(df[c].sum()) if c in df.columns else 0.0
+
+    def _lines(key: str) -> int:
+        c = _short_col(key)
+        return int((df[c] > 0).sum()) if c in df.columns else 0
+
     return {
         "lines": int(len(df)),
         "ordered": ordered,
         "confirmed": confirmed,
         "delivered": delivered,
         "invoiced": invoiced,
+        # Confirmation: Confirmed / Ordered
         "confirm_rate": _rate(confirmed, ordered),
-        "delivery_rate": _rate(delivered, ordered),
-        "invoice_rate": _rate(invoiced, ordered),
+        # Outbound delivery: vs Ordered, and vs Confirmed
+        "delivery_vs_order": _rate(delivered, ordered),
         "delivery_vs_confirmed": _rate(delivered, confirmed),
+        # Invoicing: vs Ordered (total invoice), and vs Delivered
+        "invoice_vs_order": _rate(invoiced, ordered),
         "invoice_vs_delivered": _rate(invoiced, delivered),
-        "short_unconfirmed": float(df[_short_col("unconfirmed")].sum()) if _short_col("unconfirmed") in df else 0.0,
-        "short_delivery": float(df[_short_col("delivery")].sum()) if _short_col("delivery") in df else 0.0,
-        "short_invoice": float(df[_short_col("invoice")].sum()) if _short_col("invoice") in df else 0.0,
-        "lines_unconfirmed": int((df[_short_col("unconfirmed")] > 0).sum()) if _short_col("unconfirmed") in df else 0,
-        "lines_delivery": int((df[_short_col("delivery")] > 0).sum()) if _short_col("delivery") in df else 0,
-        "lines_invoice": int((df[_short_col("invoice")] > 0).sum()) if _short_col("invoice") in df else 0,
+        "short_unconfirmed": _short("unconfirmed"),
+        "short_delivery": _short("delivery"),
+        "short_invoice": _short("invoice"),
+        "lines_unconfirmed": _lines("unconfirmed"),
+        "lines_delivery": _lines("delivery"),
+        "lines_invoice": _lines("invoice"),
     }
 
 
 # ---------------------------------------------------------------------------
 # Short tables (template columns)
 # ---------------------------------------------------------------------------
-# Output column order exactly as the embedded template specifies.
-TEMPLATE_COLUMNS = [
-    "Plant", "Sales order #", "Customer", "Material", "Material description",
-    "Ordered", "Confirmed", "Shorted", "Reason",
-]
+def template_columns(key: str) -> list[str]:
+    """Column order for a stage's table: identity cols, Ordered for context,
+    the stage's base + fulfilled quantities, then Shorted and Reason."""
+    d = _def(key)
+    cols = ["Plant", "Sales order #", "Customer", "Material", "Material description", "Ordered"]
+    if d["base_label"] != "Ordered":
+        cols.append(d["base_label"])
+    cols += [d["fulfilled_label"], "Shorted", "Reason"]
+    return cols
 
 
 def build_short_table(df: pd.DataFrame, key: str, top_n: int | None = None) -> pd.DataFrame:
-    """Build the template table for one short analysis: only lines with a short,
+    """Table for one stage: only lines short at that stage (base > fulfilled),
     sorted by largest short. ``top_n=None`` returns all."""
+    d = _def(key)
     scol = _short_col(key)
     if scol not in df.columns:
-        return pd.DataFrame(columns=TEMPLATE_COLUMNS)
+        return pd.DataFrame(columns=template_columns(key))
 
-    sub = df[df[scol] > 0].copy()
-    sub = sub.sort_values(scol, ascending=False)
+    sub = df[df[scol] > 0].copy().sort_values(scol, ascending=False)
     if top_n is not None:
         sub = sub.head(top_n)
 
-    out = pd.DataFrame({
+    data: dict[str, Any] = {
         "Plant":               sub.get(COL_PLANT),
         "Sales order #":       sub.get(COL_SALES_ORDER),
         "Customer":            sub.get(COL_CUSTOMER),
         "Material":            sub.get(COL_MATERIAL),
         "Material description": sub.get(COL_MAT_DESC),
         "Ordered":             sub.get(COL_ORDER_QTY),
-        "Confirmed":           sub.get(COL_CONFIRMED_QTY),
-        "Shorted":             sub[scol],
-        "Reason":              sub.get(COL_REASON),
-    })
-    return out.reset_index(drop=True)
+    }
+    if d["base_label"] != "Ordered":
+        data[d["base_label"]] = sub.get(d["base_col"])
+    data[d["fulfilled_label"]] = sub.get(d["fulfilled_col"])
+    data["Shorted"] = sub[scol]
+    data["Reason"] = sub.get(COL_REASON)
+    return pd.DataFrame(data).reset_index(drop=True)
 
 
 def build_group_summary(df: pd.DataFrame, group_col: str, key: str) -> pd.DataFrame | None:
@@ -295,17 +324,19 @@ def _summary_sheet(ws, kpis: dict[str, Any]):
     ws.row_dimensions[1].height = 28
 
     rows = [
-        ("Order Lines",            f"{kpis['lines']:,}"),
-        ("Total Ordered",          f"{kpis['ordered']:,.0f}"),
-        ("Total Confirmed",        f"{kpis['confirmed']:,.0f}"),
-        ("Total Delivered",        f"{kpis['delivered']:,.0f}"),
-        ("Total Invoiced",         f"{kpis['invoiced']:,.0f}"),
-        ("Confirmation Rate",      f"{kpis['confirm_rate']:.2f}%"),
-        ("Delivery Fill Rate",     f"{kpis['delivery_rate']:.2f}%"),
-        ("Invoice Fill Rate",      f"{kpis['invoice_rate']:.2f}%"),
-        ("Unconfirmed Short (qty)", f"{kpis['short_unconfirmed']:,.0f}"),
-        ("Delivery Short (qty)",   f"{kpis['short_delivery']:,.0f}"),
-        ("Invoice Short (qty)",    f"{kpis['short_invoice']:,.0f}"),
+        ("Order Lines",                 f"{kpis['lines']:,}"),
+        ("Total Ordered",               f"{kpis['ordered']:,.0f}"),
+        ("Total Confirmed",             f"{kpis['confirmed']:,.0f}"),
+        ("Total Delivered",             f"{kpis['delivered']:,.0f}"),
+        ("Total Invoiced",              f"{kpis['invoiced']:,.0f}"),
+        ("Confirmation Rate (Conf/Ord)", f"{kpis['confirm_rate']:.2f}%"),
+        ("Delivery Rate (Dlv/Ord)",     f"{kpis['delivery_vs_order']:.2f}%"),
+        ("Delivery Rate (Dlv/Conf)",    f"{kpis['delivery_vs_confirmed']:.2f}%"),
+        ("Invoice Rate (Inv/Ord)",      f"{kpis['invoice_vs_order']:.2f}%"),
+        ("Invoice Rate (Inv/Dlv)",      f"{kpis['invoice_vs_delivered']:.2f}%"),
+        ("Ordered − Confirmed (qty)",   f"{kpis['short_unconfirmed']:,.0f}"),
+        ("Confirmed − Delivered (qty)", f"{kpis['short_delivery']:,.0f}"),
+        ("Delivered − Invoiced (qty)",  f"{kpis['short_invoice']:,.0f}"),
     ]
     r = 3
     for label, value in rows:

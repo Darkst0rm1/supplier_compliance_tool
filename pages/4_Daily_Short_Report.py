@@ -159,17 +159,20 @@ tab_over, tab_unc, tab_del, tab_inv, tab_dl = st.tabs([
 # ── Overview ─────────────────────────────────────────────────────────────────
 with tab_over:
     st.subheader("Fill Rates")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Order Lines", f"{kpis['lines']:,}")
-    c2.metric("Confirmation Rate", f"{kpis['confirm_rate']:.2f}%")
-    c3.metric("Delivery Fill Rate", f"{kpis['delivery_rate']:.2f}%")
-    c4.metric("Invoice Fill Rate", f"{kpis['invoice_rate']:.2f}%")
+    st.caption("Confirmation has one rate; outbound delivery and invoicing each have two.")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Confirmation (Conf/Ord)", f"{kpis['confirm_rate']:.2f}%")
+    c2.metric("Delivery vs Ordered", f"{kpis['delivery_vs_order']:.2f}%")
+    c3.metric("Delivery vs Confirmed", f"{kpis['delivery_vs_confirmed']:.2f}%")
+    c4.metric("Invoice vs Ordered (Total)", f"{kpis['invoice_vs_order']:.2f}%")
+    c5.metric("Invoice vs Delivered", f"{kpis['invoice_vs_delivered']:.2f}%")
 
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Ordered", f"{kpis['ordered']:,.0f}")
-    c6.metric("Confirmed", f"{kpis['confirmed']:,.0f}")
-    c7.metric("Delivered", f"{kpis['delivered']:,.0f}")
-    c8.metric("Invoiced", f"{kpis['invoiced']:,.0f}")
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("Order Lines", f"{kpis['lines']:,}")
+    c7.metric("Ordered", f"{kpis['ordered']:,.0f}")
+    c8.metric("Confirmed", f"{kpis['confirmed']:,.0f}")
+    c9.metric("Delivered", f"{kpis['delivered']:,.0f}")
+    c10.metric("Invoiced", f"{kpis['invoiced']:,.0f}")
 
     st.markdown("---")
     col_l, col_r = st.columns(2)
@@ -186,12 +189,12 @@ with tab_over:
     col_l.plotly_chart(fig_stage, use_container_width=True)
 
     short_df = pd.DataFrame({
-        "Stage": ["Unconfirmed", "At Delivery", "At Invoicing"],
+        "Stage": ["Ordered − Confirmed", "Confirmed − Delivered", "Delivered − Invoiced"],
         "Short Qty": [kpis["short_unconfirmed"], kpis["short_delivery"], kpis["short_invoice"]],
         "Lines": [kpis["lines_unconfirmed"], kpis["lines_delivery"], kpis["lines_invoice"]],
     })
     fig_short = px.bar(
-        short_df, x="Stage", y="Short Qty", title="Short Quantity by Stage",
+        short_df, x="Stage", y="Short Qty", title="Short Quantity by Stage (stage-to-stage gap)",
         text="Lines", color="Short Qty", color_continuous_scale=["#FEF3C7", "#EF4444"],
     )
     fig_short.update_traces(texttemplate="%{text} lines", textposition="outside")
@@ -199,18 +202,22 @@ with tab_over:
     col_r.plotly_chart(fig_short, use_container_width=True)
 
 
-def _render_short_tab(key: str, label: str):
+def _render_short_tab(key: str, label: str, rates: list[tuple[str, float]], caption: str):
     scol = {"unconfirmed": "short_unconfirmed", "delivery": "short_delivery",
             "invoice": "short_invoice"}[key]
     lcol = {"unconfirmed": "lines_unconfirmed", "delivery": "lines_delivery",
             "invoice": "lines_invoice"}[key]
-    m1, m2 = st.columns(2)
-    m1.metric("Total Short (qty)", f"{kpis[scol]:,.0f}")
-    m2.metric("Lines Shorted", f"{kpis[lcol]:,}")
+
+    cols = st.columns(len(rates) + 2)
+    for col, (rlabel, rval) in zip(cols, rates):
+        col.metric(rlabel, f"{rval:.2f}%")
+    cols[-2].metric("Total Short (qty)", f"{kpis[scol]:,.0f}")
+    cols[-1].metric("Lines Shorted", f"{kpis[lcol]:,}")
 
     table = build_short_table(df, key, top_n=top_n)
     heading = "all lines" if top_n is None else f"Top {top_n}"
     st.subheader(f"{label} — {heading}")
+    st.caption(caption)
     if table.empty:
         st.success("No shorts found for this stage.")
         return
@@ -241,11 +248,25 @@ def _render_short_tab(key: str, label: str):
 
 
 with tab_unc:
-    _render_short_tab("unconfirmed", "Unconfirmed Quantities")
+    _render_short_tab(
+        "unconfirmed", "Unconfirmed Quantities",
+        rates=[("Confirmation (Conf/Ord)", kpis["confirm_rate"])],
+        caption="Lines ordered but not fully confirmed. Shorted = Ordered − Confirmed.",
+    )
 with tab_del:
-    _render_short_tab("delivery", "Shorted at Outbound Delivery")
+    _render_short_tab(
+        "delivery", "Confirmed but No Outbound Delivery",
+        rates=[("Delivery vs Ordered", kpis["delivery_vs_order"]),
+               ("Delivery vs Confirmed", kpis["delivery_vs_confirmed"])],
+        caption="Lines confirmed but not (fully) put on an outbound delivery. Shorted = Confirmed − Delivered.",
+    )
 with tab_inv:
-    _render_short_tab("invoice", "Shorted at Invoicing")
+    _render_short_tab(
+        "invoice", "Delivered but Not Invoiced",
+        rates=[("Invoice vs Ordered (Total)", kpis["invoice_vs_order"]),
+               ("Invoice vs Delivered", kpis["invoice_vs_delivered"])],
+        caption="Lines delivered but not (fully) invoiced. Shorted = Delivered − Invoiced.",
+    )
 
 # ── Download ─────────────────────────────────────────────────────────────────
 with tab_dl:
