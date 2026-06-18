@@ -18,5 +18,9 @@ pg = st.navigation([
         "pages/3_Sales_Order_Fill_Rate_Dashboard.py",
         title="Sales Order Fill Rate Dashboard",
     ),
+    st.Page(
+        "pages/4_Daily_Short_Report.py",
+        title="Daily Short Report",
+    ),
 ])
 pg.run()
