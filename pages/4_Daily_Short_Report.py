@@ -6,6 +6,7 @@ from datetime import date
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.daily_short_engine import (
@@ -177,15 +178,40 @@ with tab_over:
     st.markdown("---")
     col_l, col_r = st.columns(2)
 
-    stage_df = pd.DataFrame({
-        "Stage": ["Ordered", "Confirmed", "Delivered", "Invoiced"],
-        "Quantity": [kpis["ordered"], kpis["confirmed"], kpis["delivered"], kpis["invoiced"]],
-    })
-    fig_stage = px.bar(
-        stage_df, x="Stage", y="Quantity", title="Quantity by Fulfilment Stage",
-        color="Stage", color_discrete_sequence=["#1F4E79", "#2E75B6", "#F59E0B", "#EF4444"],
+    # Waterfall: start at Ordered, subtract the loss at each stage, end at Invoiced.
+    ordered = kpis["ordered"] or 1  # guard divide-by-zero
+    g1 = kpis["ordered"] - kpis["confirmed"]      # ordered not confirmed
+    g2 = kpis["confirmed"] - kpis["delivered"]    # confirmed not delivered
+    g3 = kpis["delivered"] - kpis["invoiced"]     # delivered not invoiced
+
+    def _pof(v):  # percent of ordered
+        return f"{v / ordered * 100:.1f}% of ord."
+
+    fig_stage = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=["absolute", "relative", "relative", "relative", "total"],
+        x=["Ordered", "Not Confirmed", "Not Delivered", "Not Invoiced", "Invoiced"],
+        y=[kpis["ordered"], -g1, -g2, -g3, kpis["invoiced"]],
+        text=[
+            f"{kpis['ordered']:,.0f}<br>100%",
+            f"−{g1:,.0f}<br>{_pof(g1)}",
+            f"−{g2:,.0f}<br>{_pof(g2)}",
+            f"−{g3:,.0f}<br>{_pof(g3)}",
+            f"{kpis['invoiced']:,.0f}<br>{kpis['invoice_vs_order']:.1f}% of ord.",
+        ],
+        textposition="outside",
+        connector={"line": {"color": "#9AA0A6"}},
+        decreasing={"marker": {"color": "#EF4444"}},
+        increasing={"marker": {"color": "#22C55E"}},
+        totals={"marker": {"color": "#1F4E79"}},
+        hovertemplate="%{x}: %{y:,.0f}<extra></extra>",
+    ))
+    fig_stage.update_layout(
+        title="Order → Invoice: where quantity is lost",
+        margin=dict(t=50, b=0, l=0, r=0),
+        yaxis_title="Cases (CS)",
+        showlegend=False,
     )
-    fig_stage.update_layout(margin=dict(t=40, b=0, l=0, r=0), showlegend=False)
     col_l.plotly_chart(fig_stage, use_container_width=True)
 
     short_df = pd.DataFrame({

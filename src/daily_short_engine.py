@@ -317,38 +317,56 @@ def _write_df(ws, df: pd.DataFrame, start_row: int = 1) -> int:
 def _summary_sheet(ws, kpis: dict[str, Any]):
     ws.title = "Summary"
     ws.sheet_view.showGridLines = False
-    ws.merge_cells("A1:C1")
+    ws.merge_cells("A1:D1")
     t = ws.cell(row=1, column=1, value="Daily Short Report — Summary")
     t.font = _TITLE_FONT
     t.alignment = _CENTER
     ws.row_dimensions[1].height = 28
 
-    rows = [
-        ("Order Lines",                 f"{kpis['lines']:,}"),
-        ("Total Ordered",               f"{kpis['ordered']:,.0f}"),
-        ("Total Confirmed",             f"{kpis['confirmed']:,.0f}"),
-        ("Total Delivered",             f"{kpis['delivered']:,.0f}"),
-        ("Total Invoiced",              f"{kpis['invoiced']:,.0f}"),
-        ("Confirmation Rate (Conf/Ord)", f"{kpis['confirm_rate']:.2f}%"),
-        ("Delivery Rate (Dlv/Ord)",     f"{kpis['delivery_vs_order']:.2f}%"),
-        ("Delivery Rate (Dlv/Conf)",    f"{kpis['delivery_vs_confirmed']:.2f}%"),
-        ("Invoice Rate (Inv/Ord)",      f"{kpis['invoice_vs_order']:.2f}%"),
-        ("Invoice Rate (Inv/Dlv)",      f"{kpis['invoice_vs_delivered']:.2f}%"),
-        ("Ordered − Confirmed (qty)",   f"{kpis['short_unconfirmed']:,.0f}"),
-        ("Confirmed − Delivered (qty)", f"{kpis['short_delivery']:,.0f}"),
-        ("Delivered − Invoiced (qty)",  f"{kpis['short_invoice']:,.0f}"),
+    def _pct(v: float) -> str:
+        return f"{v:.2f}%"
+
+    # Stage table — percentages sit right next to each quantity line.
+    stage_df = pd.DataFrame([
+        {"Stage": "Ordered",   "Quantity": round(kpis["ordered"]),
+         "% of Ordered": "100.00%", "% of Prior Stage": "—"},
+        {"Stage": "Confirmed", "Quantity": round(kpis["confirmed"]),
+         "% of Ordered": _pct(kpis["confirm_rate"]),
+         "% of Prior Stage": f"{_pct(kpis['confirm_rate'])} of Ordered"},
+        {"Stage": "Delivered", "Quantity": round(kpis["delivered"]),
+         "% of Ordered": _pct(kpis["delivery_vs_order"]),
+         "% of Prior Stage": f"{_pct(kpis['delivery_vs_confirmed'])} of Confirmed"},
+        {"Stage": "Invoiced",  "Quantity": round(kpis["invoiced"]),
+         "% of Ordered": _pct(kpis["invoice_vs_order"]),
+         "% of Prior Stage": f"{_pct(kpis['invoice_vs_delivered'])} of Delivered"},
+    ])
+    next_row = _write_df(ws, stage_df, start_row=3)
+    for r in range(4, 4 + len(stage_df)):       # format the Quantity column
+        ws.cell(row=r, column=2).number_format = "#,##0"
+
+    # Gap / line-count KPIs below the stage table.
+    kpi_rows = [
+        ("Order Lines",                   f"{kpis['lines']:,}"),
+        ("Ordered − Confirmed",           f"{kpis['short_unconfirmed']:,.0f} qty · {kpis['lines_unconfirmed']:,} lines"),
+        ("Confirmed − Delivered",         f"{kpis['short_delivery']:,.0f} qty · {kpis['lines_delivery']:,} lines"),
+        ("Delivered − Invoiced",          f"{kpis['short_invoice']:,.0f} qty · {kpis['lines_invoice']:,} lines"),
     ]
-    r = 3
-    for label, value in rows:
+    r = next_row
+    for label, value in kpi_rows:
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=4)
         lc = ws.cell(row=r, column=1, value=label)
         vc = ws.cell(row=r, column=2, value=value)
         lc.fill = vc.fill = _KPI_FILL
         lc.font = _KPI_LABEL; lc.alignment = _LEFT; lc.border = _BORDER
-        vc.font = _KPI_VALUE; vc.alignment = _CENTER; vc.border = _BORDER
+        vc.font = _KPI_VALUE; vc.alignment = _LEFT; vc.border = _BORDER
         ws.row_dimensions[r].height = 20
         r += 1
-    ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 18
+
+    _autofit(ws)
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 22
 
 
 def generate_excel_report(df: pd.DataFrame, kpis: dict[str, Any], top_n: int | None = None) -> bytes:
