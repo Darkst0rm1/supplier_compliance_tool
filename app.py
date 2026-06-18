@@ -20,7 +20,7 @@ pg = st.navigation([
     ),
     st.Page(
         "pages/4_Daily_Short_Report.py",
-        title="Daily Short Report",
+        title="Daily Short Report Dashboard",
     ),
 ])
 pg.run()
