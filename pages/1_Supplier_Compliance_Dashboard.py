@@ -6,7 +6,7 @@ from datetime import date
 import streamlit as st
 
 from src.compliance_engine import build_report
-from src.config import MONTH_NAMES, SAP_FILTER_DATE_COLUMNS
+from src.config import EXCLUDED_PO_PREFIXES, MONTH_NAMES, SAP_FILTER_DATE_COLUMNS
 from src.portal_importer import PortalImportError, load_portal
 from src.report_generator import generate_workbook
 from src.sap_importer import SapImportError, describe_missing_optionals, load_sap
@@ -74,6 +74,15 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
         st.warning(
             f"No portal rows found for {MONTH_NAMES[sel_month - 1]} {sel_year}. "
             "The report will be generated using SAP data only."
+        )
+
+    sap_excluded = sap_df.attrs.get("excluded_po_count", 0)
+    portal_excluded = portal_df.attrs.get("excluded_po_count", 0)
+    if sap_excluded or portal_excluded:
+        st.info(
+            f"Disregarded {sap_excluded:,} SAP and {portal_excluded:,} portal PO(s) "
+            f"starting with {', '.join(EXCLUDED_PO_PREFIXES)} (excluded PO type — "
+            "not subject to portal documentation)."
         )
 
     with st.spinner("Applying compliance rules..."):

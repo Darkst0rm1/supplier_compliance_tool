@@ -37,6 +37,12 @@ SAP_OPTIONAL_DATE_COLUMNS = [
     "Est PU Date",
 ]
 
+# PO numbers beginning with any of these prefixes are disregarded entirely —
+# they're a different PO type that is not subject to portal inbound
+# documentation, so they must never count toward compliance. Excluded from
+# BOTH the SAP and Portal sides during import.
+EXCLUDED_PO_PREFIXES = ("6",)
+
 PORTAL_REQUIRED_COLUMNS = [
     "PO Number",
     "Supplier Name",

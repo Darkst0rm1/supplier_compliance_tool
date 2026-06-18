@@ -9,12 +9,13 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import (
+    EXCLUDED_PO_PREFIXES,
     SAP_CANONICAL_COLUMNS,
     SAP_COLUMN_ALIASES,
     SAP_HARD_REQUIRED_COLUMNS,
     SAP_OPTIONAL_DATE_COLUMNS,
 )
-from .normalizer import normalize_po
+from .normalizer import is_excluded_po, normalize_po
 
 
 class SapImportError(Exception):
@@ -66,6 +67,17 @@ def load_sap(file) -> pd.DataFrame:
 
     # 5) Normalize PO Numbers and tidy string columns.
     df["Normalized PO Number"] = df["PO Number"].apply(normalize_po)
+
+    # 5a) Disregard excluded PO types (e.g. POs starting with "6") so they
+    #     never feed compliance, rollups, or bill-back. Record the count.
+    excluded_mask = df["Normalized PO Number"].apply(
+        lambda po: is_excluded_po(po, EXCLUDED_PO_PREFIXES)
+    )
+    excluded_count = int(excluded_mask.sum())
+    if excluded_count:
+        df = df.loc[~excluded_mask].copy()
+    df.attrs["excluded_po_count"] = excluded_count
+
     for col in _STRING_COLS:
         df[col] = df[col].fillna("").astype(str).str.strip()
     df["PO Status"] = df["PO Status"].str.upper()

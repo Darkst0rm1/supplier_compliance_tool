@@ -67,6 +67,16 @@ def split_multi_po(value) -> list[str]:
     return out
 
 
+def is_excluded_po(po: str, prefixes: tuple[str, ...]) -> bool:
+    """True if a normalized PO should be disregarded (starts with any prefix).
+
+    ``prefixes`` is empty -> nothing is excluded.
+    """
+    if not po or not prefixes:
+        return False
+    return po.startswith(tuple(prefixes))
+
+
 def has_value(value) -> bool:
     """True if the cell holds a real non-empty value (used for Inbound Delivery)."""
     if value is None:

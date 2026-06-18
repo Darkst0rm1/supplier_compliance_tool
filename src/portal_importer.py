@@ -9,11 +9,12 @@ from __future__ import annotations
 import pandas as pd
 
 from .config import (
+    EXCLUDED_PO_PREFIXES,
     PORTAL_COLUMN_ALIASES,
     PORTAL_OPTIONAL_COLUMNS,
     PORTAL_REQUIRED_COLUMNS,
 )
-from .normalizer import split_multi_po
+from .normalizer import is_excluded_po, split_multi_po
 
 
 class PortalImportError(Exception):
@@ -64,6 +65,16 @@ def load_portal(file, report_year: int, report_month: int) -> pd.DataFrame:
     df = df.explode("__pos", ignore_index=True)
     df["Normalized PO Number"] = df["__pos"].fillna("")
     df = df.drop(columns="__pos")
+
+    # Disregard excluded PO types (e.g. POs starting with "6") so they never
+    # feed compliance or "needs review" sheets. Record the count.
+    excluded_mask = df["Normalized PO Number"].apply(
+        lambda po: is_excluded_po(po, EXCLUDED_PO_PREFIXES)
+    )
+    excluded_count = int(excluded_mask.sum())
+    if excluded_count:
+        df = df.loc[~excluded_mask].copy()
+    df.attrs["excluded_po_count"] = excluded_count
 
     # Clean string columns (don't touch dates).
     for col in ["Supplier Name", "File Name", "Uploaded By", "File Status",
