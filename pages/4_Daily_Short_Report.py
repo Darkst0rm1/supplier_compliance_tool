@@ -298,9 +298,10 @@ with tab_inv:
 with tab_dl:
     st.subheader("Download Excel Report")
     st.markdown(
-        "A workbook with a **Summary** sheet (totals + fill rates) and one sheet "
-        "per short analysis, using the template columns: Plant, Sales order #, "
-        "Customer, Material, Material description, Ordered, Confirmed, Shorted, Reason."
+        "A workbook with a **Summary** sheet (totals + fill rates), one sheet "
+        "per short analysis (template columns: Plant, Sales order #, Customer, "
+        "Material, Material description, Ordered, Confirmed, Shorted, Reason), and a "
+        "**Raw Data** sheet with every order line behind the report."
     )
     if _filtered:
         st.info(f"The report reflects your active filters ({len(df):,} of {len(df_all):,} lines).")
