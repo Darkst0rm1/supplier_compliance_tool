@@ -19,6 +19,8 @@ from src.sales_order_engine import (
     generate_excel_report,
     load_sales_order,
 )
+from src.column_variants import REPORT_SALES_ORDER_UNCONFIRMED, apply_columns
+from src.column_variants_ui import render_variant_panel
 
 st.title("Sales Order Fill Rate Dashboard")
 st.caption(
@@ -367,6 +369,12 @@ with tab_exec:
 with tab_unc:
     st.subheader(f"Unconfirmed Demand Report — {len(unconfirmed_df):,} problem lines")
 
+    unconf_cols = render_variant_panel(
+        REPORT_SALES_ORDER_UNCONFIRMED,
+        list(unconfirmed_df.columns),
+        key_prefix="sov_unconfirmed_variant",
+    )
+
     if unconfirmed_df.empty:
         st.success("No unconfirmed demand found in this dataset.")
     else:
@@ -392,7 +400,7 @@ with tab_unc:
         if sel_pri   != "All" and "Priority"     in view.columns: view = view[view["Priority"]      == sel_pri]
 
         st.caption(f"Showing {len(view):,} rows after filters.")
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(apply_columns(view, unconf_cols), use_container_width=True, hide_index=True)
 
 # ── Key Account Summary ───────────────────────────────────────────────────────
 with tab_acct:
@@ -526,7 +534,7 @@ with tab_dl:
                 df_clean=df_filtered,
                 df_raw=df_raw,
                 kpis=kpis,
-                unconfirmed_df=unconfirmed_df,
+                unconfirmed_df=apply_columns(unconfirmed_df, unconf_cols),
                 account_df=account_df if account_df is not None else pd.DataFrame(),
                 product_df=product_df if product_df is not None else pd.DataFrame(),
                 plant_df=plant_df   if plant_df   is not None else pd.DataFrame(),
