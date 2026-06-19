@@ -18,6 +18,8 @@ from src.fill_rate_engine import (
     generate_excel_report,
     load_fill_rate,
 )
+from src.column_variants import REPORT_DELIVERY_SHORTAGE, apply_columns
+from src.column_variants_ui import render_variant_panel
 
 st.title("Delivery Fill Rate Dashboard")
 st.caption(
@@ -368,10 +370,20 @@ with tab_short:
     st.subheader(f"Shortage Report — {len(shortage_df):,} problem lines")
     st.caption("Sorted by highest Short Amount. Use sidebar filters to narrow results.")
 
+    shortage_cols = render_variant_panel(
+        REPORT_DELIVERY_SHORTAGE,
+        list(shortage_df.columns),
+        key_prefix="dfr_shortage_variant",
+    )
+
     if shortage_df.empty:
         st.success("No shortages or fill rate issues found.")
     else:
-        st.dataframe(shortage_df, use_container_width=True, hide_index=True)
+        st.dataframe(
+            apply_columns(shortage_df, shortage_cols),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 # ── Product Summary ─────────────────────────────────────────────────────────
 with tab_prod:
@@ -514,7 +526,7 @@ with tab_download:
                 df_clean=df_filtered,
                 df_raw=df_raw,
                 kpis=kpis,
-                shortage_df=shortage_df,
+                shortage_df=apply_columns(shortage_df, shortage_cols),
                 product_df=product_df if product_df is not None else pd.DataFrame(),
                 plant_df=plant_df if plant_df is not None else pd.DataFrame(),
                 top10=top10,
