@@ -230,4 +230,6 @@ class VariantStore:
 
     def delete_variant(self, variant_id: int) -> None:
         with self._connect() as conn:
-            conn.execute("DELETE FROM column_variants WHERE id = %s", (variant_id,))
+            cur = conn.execute("DELETE FROM column_variants WHERE id = %s", (variant_id,))
+        if cur.rowcount == 0:
+            raise VariantNotFoundError(f"variant {variant_id} not found")

@@ -187,3 +187,9 @@ def test_variants_separated_by_report_key(store):
     store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "DelOnly", ["product"])
     so_names = [x.name for x in store.list_variants(REPORT_SALES_ORDER_UNCONFIRMED)]
     assert PREFIX + "DelOnly" not in so_names
+
+
+@needs_db
+def test_delete_missing_id_raises(store):
+    with pytest.raises(VariantNotFoundError):
+        store.delete_variant(999999999)

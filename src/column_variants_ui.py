@@ -105,7 +105,7 @@ def render_variant_panel(report_key: str, all_columns: list[str], key_prefix: st
         st.caption("● Unsaved changes — click **Save**, or **Save as new** to keep them.")
 
     b_save, b_del = st.columns(2)
-    if b_save.button("💾 Save", disabled=is_standard or not dirty,
+    if b_save.button("💾 Save", disabled=is_standard or not dirty or not chosen,
                      key=f"{key_prefix}_btn_save", use_container_width=True):
         try:
             store.update_columns(by_name[selected]["id"], chosen)
