@@ -12,6 +12,10 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
+import psycopg
+from psycopg.errors import UniqueViolation
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 # --- constants -------------------------------------------------------------
 REPORT_DELIVERY_SHORTAGE = "delivery_shortage"
@@ -103,3 +107,127 @@ def apply_columns(df: pd.DataFrame, columns: Iterable[str] | None) -> pd.DataFra
     if not present:
         return df
     return df[present]
+
+
+# --- store -----------------------------------------------------------------
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS column_variants (
+        id          BIGSERIAL   PRIMARY KEY,
+        report_key  TEXT        NOT NULL CHECK (
+                        report_key IN ('delivery_shortage', 'sales_order_unconfirmed')
+                    ),
+        name        TEXT        NOT NULL,
+        columns     JSONB       NOT NULL CHECK (
+                        jsonb_typeof(columns) = 'array'
+                        AND jsonb_array_length(columns) > 0
+                    ),
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_column_variants_report ON column_variants (report_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_column_variants_report_name_ci "
+    "ON column_variants (report_key, LOWER(name))",
+)
+
+_COLS = "id, report_key, name, columns, created_at, updated_at"
+
+
+def _row_to_variant(row: dict) -> Variant:
+    return Variant(
+        id=row["id"],
+        report_key=row["report_key"],
+        name=row["name"],
+        columns=list(row["columns"]),
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
+
+
+class VariantStore:
+    """Postgres-backed store for shared column variants.
+
+    One short-lived autocommit connection is opened per operation, which is
+    robust against serverless Postgres (Neon) closing idle connections.
+    """
+
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def _connect(self):
+        return psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
+
+    def ensure_schema(self) -> None:
+        with self._connect() as conn:
+            for stmt in _SCHEMA_STATEMENTS:
+                conn.execute(stmt)
+
+    def list_variants(self, report_key: str) -> list[Variant]:
+        validate_report_key(report_key)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLS} FROM column_variants "
+                f"WHERE report_key = %s ORDER BY LOWER(name)",
+                (report_key,),
+            ).fetchall()
+        return [_row_to_variant(r) for r in rows]
+
+    def get_variant(self, variant_id: int) -> Variant:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT {_COLS} FROM column_variants WHERE id = %s", (variant_id,)
+            ).fetchone()
+        if row is None:
+            raise VariantNotFoundError(f"variant {variant_id} not found")
+        return _row_to_variant(row)
+
+    def create_variant(self, report_key: str, name: str, columns: Any) -> Variant:
+        validate_report_key(report_key)
+        clean_name = validate_name(name)
+        clean_cols = normalize_columns(columns)
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"INSERT INTO column_variants (report_key, name, columns) "
+                    f"VALUES (%s, %s, %s) RETURNING {_COLS}",
+                    (report_key, clean_name, Jsonb(clean_cols)),
+                ).fetchone()
+        except UniqueViolation as exc:
+            raise DuplicateVariantError(
+                f"a variant named '{clean_name}' already exists"
+            ) from exc
+        return _row_to_variant(row)
+
+    def update_columns(self, variant_id: int, columns: Any) -> Variant:
+        clean_cols = normalize_columns(columns)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"UPDATE column_variants SET columns = %s, updated_at = now() "
+                f"WHERE id = %s RETURNING {_COLS}",
+                (Jsonb(clean_cols), variant_id),
+            ).fetchone()
+        if row is None:
+            raise VariantNotFoundError(f"variant {variant_id} not found")
+        return _row_to_variant(row)
+
+    def rename_variant(self, variant_id: int, name: str) -> Variant:
+        clean_name = validate_name(name)
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"UPDATE column_variants SET name = %s, updated_at = now() "
+                    f"WHERE id = %s RETURNING {_COLS}",
+                    (clean_name, variant_id),
+                ).fetchone()
+        except UniqueViolation as exc:
+            raise DuplicateVariantError(
+                f"a variant named '{clean_name}' already exists"
+            ) from exc
+        if row is None:
+            raise VariantNotFoundError(f"variant {variant_id} not found")
+        return _row_to_variant(row)
+
+    def delete_variant(self, variant_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM column_variants WHERE id = %s", (variant_id,))

@@ -1,6 +1,9 @@
 """Tests for shared column variants."""
 from __future__ import annotations
 
+import os
+import time
+
 import pandas as pd
 import pytest
 
@@ -107,3 +110,80 @@ def test_apply_columns_empty_or_none_returns_unchanged():
 
 def test_standard_name_constant():
     assert STANDARD_NAME == "Standard"
+
+
+from src.column_variants import (
+    DuplicateVariantError,
+    VariantNotFoundError,
+    VariantStore,
+)
+
+TEST_DSN = os.environ.get("TEST_DATABASE_URL")
+needs_db = pytest.mark.skipif(not TEST_DSN, reason="TEST_DATABASE_URL not set")
+PREFIX = "pytest_cv_"
+
+
+@pytest.fixture
+def store():
+    s = VariantStore(TEST_DSN)
+    s.ensure_schema()
+    yield s
+    with s._connect() as conn:  # noqa: SLF001 - test cleanup
+        conn.execute("DELETE FROM column_variants WHERE name LIKE %s", (PREFIX + "%",))
+
+
+@needs_db
+def test_create_list_get_roundtrip(store):
+    v = store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "A", ["product", "plant"])
+    assert v.id > 0
+    assert v.columns == ["product", "plant"]
+    fetched = store.get_variant(v.id)
+    assert fetched.name == PREFIX + "A"
+    names = [x.name for x in store.list_variants(REPORT_DELIVERY_SHORTAGE)]
+    assert PREFIX + "A" in names
+
+
+@needs_db
+def test_duplicate_name_case_insensitive(store):
+    store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Dup", ["product"])
+    with pytest.raises(DuplicateVariantError):
+        store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "dup", ["plant"])
+
+
+@needs_db
+def test_update_columns_bumps_updated_at(store):
+    v = store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Upd", ["product"])
+    time.sleep(0.02)
+    v2 = store.update_columns(v.id, ["plant", "short_amount"])
+    assert v2.columns == ["plant", "short_amount"]
+    assert v2.updated_at > v2.created_at
+
+
+@needs_db
+def test_rename(store):
+    v = store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Old", ["product"])
+    v2 = store.rename_variant(v.id, PREFIX + "New")
+    assert v2.name == PREFIX + "New"
+
+
+@needs_db
+def test_rename_into_existing_name_rejected(store):
+    store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Taken", ["product"])
+    v = store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Move", ["plant"])
+    with pytest.raises(DuplicateVariantError):
+        store.rename_variant(v.id, PREFIX + "taken")
+
+
+@needs_db
+def test_delete(store):
+    v = store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "Gone", ["product"])
+    store.delete_variant(v.id)
+    with pytest.raises(VariantNotFoundError):
+        store.get_variant(v.id)
+
+
+@needs_db
+def test_variants_separated_by_report_key(store):
+    store.create_variant(REPORT_DELIVERY_SHORTAGE, PREFIX + "DelOnly", ["product"])
+    so_names = [x.name for x in store.list_variants(REPORT_SALES_ORDER_UNCONFIRMED)]
+    assert PREFIX + "DelOnly" not in so_names
