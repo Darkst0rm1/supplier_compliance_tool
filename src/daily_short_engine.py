@@ -390,6 +390,16 @@ def generate_excel_report(df: pd.DataFrame, kpis: dict[str, Any], top_n: int | N
             _write_df(ws, table, start_row=2)
         _autofit(ws)
 
+    # Raw Data — every order line behind the report (source columns only;
+    # internal helper columns like _short_* are dropped).
+    ws_raw = wb.create_sheet("Raw Data")
+    raw = df.drop(columns=[c for c in df.columns if str(c).startswith("_short_")], errors="ignore")
+    if raw.empty:
+        ws_raw.cell(row=1, column=1, value="No data.")
+    else:
+        _write_df(ws_raw, raw, start_row=1)
+    _autofit(ws_raw)
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
