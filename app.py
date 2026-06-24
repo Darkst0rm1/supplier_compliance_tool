@@ -26,5 +26,9 @@ pg = st.navigation([
         "pages/5_Overstock_Report.py",
         title="Overstock Report",
     ),
+    st.Page(
+        "pages/6_Donate_Dispose_List.py",
+        title="Donate / Dispose List",
+    ),
 ])
 pg.run()
