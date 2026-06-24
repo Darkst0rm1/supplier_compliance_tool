@@ -207,16 +207,33 @@ def _coerce_report_date(report_date: date | datetime | None) -> date:
     return report_date
 
 
+def default_window(report_date: date | datetime | None = None) -> tuple[date, date]:
+    """The default (SLED floor, last-sell cutoff) for a given run date. Used to
+    pre-fill the page; the user can override either date freely."""
+    rpt = _coerce_report_date(report_date)
+    return (rpt + timedelta(days=SLED_FLOOR_OFFSET_DAYS),
+            rpt + timedelta(days=LAST_SELL_CUTOFF_OFFSET_DAYS))
+
+
 def build_overstock(
     materials: pd.DataFrame,
     master: pd.DataFrame,
+    sled_floor: date | datetime | None = None,
+    last_sell_cutoff: date | datetime | None = None,
     report_date: date | datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Apply every selection rule and return ``{sheet_name: DataFrame}`` with
-    one DataFrame per region in finished-workbook column order."""
-    rpt = _coerce_report_date(report_date)
-    sled_floor = pd.Timestamp(rpt + timedelta(days=SLED_FLOOR_OFFSET_DAYS))
-    last_sell_cutoff = pd.Timestamp(rpt + timedelta(days=LAST_SELL_CUTOFF_OFFSET_DAYS))
+    one DataFrame per region in finished-workbook column order.
+
+    The date window is open: pass ``sled_floor`` (include SLED on/after) and
+    ``last_sell_cutoff`` (include last-sell-by on/before) explicitly. Either one
+    left as ``None`` falls back to the default offset from ``report_date``
+    (today if also ``None``)."""
+    default_floor, default_cutoff = default_window(report_date)
+    sled_floor = pd.Timestamp(sled_floor if sled_floor is not None else default_floor)
+    last_sell_cutoff = pd.Timestamp(
+        last_sell_cutoff if last_sell_cutoff is not None else default_cutoff
+    )
 
     m = materials.copy()
 

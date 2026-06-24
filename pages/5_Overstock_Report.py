@@ -7,17 +7,16 @@ workbook built to the business's golden specification.
 from __future__ import annotations
 
 import io
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 from src.overstock_engine import (
-    LAST_SELL_CUTOFF_OFFSET_DAYS,
     REGION_PLANTS,
-    SLED_FLOOR_OFFSET_DAYS,
     OverstockError,
     build_overstock,
+    default_window,
     generate_excel,
     load_master,
     load_materials,
@@ -40,18 +39,27 @@ with col_master:
         "2. Last Sell / BDM Material Master (.xlsx)", type=["xlsx"], key="ovs_master",
     )
 
-report_dt = st.date_input(
-    "Report date", value=date.today(),
-    help="The run date. Items are included when their Shelf Life Expiration "
-         f"Date is on/after this date + {SLED_FLOOR_OFFSET_DAYS} days and their "
-         f"last-sell-by date is on/before this date + {LAST_SELL_CUTOFF_OFFSET_DAYS} days.",
-)
-sled_floor = report_dt + timedelta(days=SLED_FLOOR_OFFSET_DAYS)
-cutoff = report_dt + timedelta(days=LAST_SELL_CUTOFF_OFFSET_DAYS)
-st.caption(
-    f"Window for this run — Shelf Life Expiration on/after **{sled_floor:%m/%d/%Y}**, "
-    f"last sell by date on/before **{cutoff:%m/%d/%Y}**."
-)
+# Open date window — set both ends yourself. Defaults reproduce a same-day run
+# but the result depends only on the dates below, never on today's weekday.
+_def_floor, _def_cutoff = default_window(date.today())
+st.markdown("**Date window**")
+col_floor, col_cutoff = st.columns(2)
+with col_floor:
+    sled_floor = st.date_input(
+        "Include shelf-life expiry on/after", value=_def_floor,
+        help="Rows whose Shelf Life Expiration Date is earlier than this are dropped.",
+    )
+with col_cutoff:
+    cutoff = st.date_input(
+        "Last sell by date on/before", value=_def_cutoff,
+        help="Rows whose last-sell-by date (SLED − Last Sell Day) is later than this are dropped.",
+    )
+
+if sled_floor > cutoff:
+    st.warning(
+        "The shelf-life floor is after the last-sell cutoff — that usually keeps "
+        "nothing. Double-check the two dates."
+    )
 
 if materials_file is None or master_file is None:
     st.info("Upload both files to generate the report.")
@@ -62,16 +70,20 @@ if not st.button("Process files", type="primary"):
 
 
 @st.cache_data(show_spinner=False)
-def _process(mat_bytes: bytes, master_bytes: bytes, rpt: date):
+def _process(mat_bytes: bytes, master_bytes: bytes, floor: date, cut: date):
     materials = load_materials(io.BytesIO(mat_bytes))
     master = load_master(io.BytesIO(master_bytes))
-    sheets = build_overstock(materials, master, report_date=rpt)
+    sheets = build_overstock(
+        materials, master, sled_floor=floor, last_sell_cutoff=cut,
+    )
     return sheets
 
 
 with st.spinner("Matching inventory to the master and applying overstock rules..."):
     try:
-        sheets = _process(materials_file.getvalue(), master_file.getvalue(), report_dt)
+        sheets = _process(
+            materials_file.getvalue(), master_file.getvalue(), sled_floor, cutoff,
+        )
     except OverstockError as exc:
         st.error(str(exc))
         st.stop()
@@ -81,7 +93,7 @@ with st.spinner("Matching inventory to the master and applying overstock rules..
 
 total_rows = sum(len(df) for df in sheets.values())
 if total_rows == 0:
-    st.warning("No overstock rows matched the rules for this report date.")
+    st.warning("No overstock rows matched the rules for this date window.")
     st.stop()
 
 cols = st.columns(len(sheets))
@@ -103,6 +115,6 @@ with st.spinner("Building workbook..."):
 st.download_button(
     "⬇️ Download Overstock_Report.xlsx",
     data=xlsx,
-    file_name=f"Overstock report {report_dt:%B %d %Y}.xlsx",
+    file_name=f"Overstock report {date.today():%B %d %Y}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
