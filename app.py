@@ -22,5 +22,9 @@ pg = st.navigation([
         "pages/4_Daily_Short_Report.py",
         title="Daily Short Report Dashboard",
     ),
+    st.Page(
+        "pages/5_Overstock_Report.py",
+        title="Overstock Report",
+    ),
 ])
 pg.run()
