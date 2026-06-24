@@ -16,18 +16,21 @@ the golden specification. Rules reverse-engineered against it (all three sheets
 reproduced exactly — 48 / 92 / 19 rows):
 
 1. Total stock = Unrestricted + Quality Inspection + Blocked > 0.
-2. Plant belongs to the sheet's region (shared ``REGION_PLANTS``).
+2. Plant belongs to the sheet's region (see ``REGION_PLANTS``).
 3. Material number does NOT start with "40" (display / shipper / label / sample
-   packaging, never sellable stock) — shared with overstock.
+   packaging, never sellable stock).
 4. The Material matches a master ``Product Number`` (so it has a Last Sell Day).
 5. NOT the RANA retail brand handled by Sandra; NOT the Sweet Street ("SSD …")
-   brand — shared with overstock.
+   brand.
 6. Shelf Life Expiration Date present and on/before the cutoff
    (report date + ``SLED_CUTOFF_OFFSET_DAYS``).
 
 There is **no** storage-location restriction and **no** last-sell-date filter
 (the SLED cutoff alone defines the window). Rows are sorted by Shelf Life
 Expiration Date ascending within each sheet.
+
+This module is intentionally self-contained (it does not import the overstock
+engine) — every engine in this app stands alone to keep imports simple.
 """
 from __future__ import annotations
 
@@ -40,55 +43,39 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from src.overstock_engine import (
-    EXCLUDED_MATERIAL_PREFIXES,
-    MASTER_BDM_NAME,
-    MASTER_LAST_SELL,
-    MASTER_PRODUCT,
-    MAT_BATCH,
-    MAT_BLOCKED,
-    MAT_DESCRIPTION,
-    MAT_MATERIAL,
-    MAT_PLANT,
-    MAT_PLANT_NAME,
-    MAT_QUALITY,
-    MAT_SLED,
-    MAT_SPECIAL_STOCK,
-    MAT_STORAGE_DESC,
-    MAT_STORAGE_LOC,
-    MAT_TEXT_COLS,
-    MAT_UNRESTRICTED,
-    OUT_BDM,
-    RANA_DESC_PREFIX,
-    RANA_EXCLUDED_BDM,
-    REGION_PLANTS,
-    STOCK_COLS,
-    SWEET_STREET_DESC_PREFIX,
-    OverstockError,
-    _coerce_report_date,
-    load_master,
-    load_materials,
-)
 
-# Re-export the shared loaders/error so the page imports from one module.
-DonateDisposeError = OverstockError
-__all__ = [
-    "DonateDisposeError",
-    "REGION_PLANTS",
-    "SLED_CUTOFF_OFFSET_DAYS",
-    "build_donate_dispose",
-    "default_cutoff",
-    "generate_excel",
-    "load_master",
-    "load_materials",
-]
+class DonateDisposeError(Exception):
+    """Raised when an uploaded file isn't a usable Donate/Dispose source export."""
+
 
 # ---------------------------------------------------------------------------
-# Output columns (note: this report uses "Last sell day" / "Last sell date",
-# without the "by" the overstock report uses).
+# Source columns (exact export headers)
 # ---------------------------------------------------------------------------
+MAT_MATERIAL      = "Material"
+MAT_DESCRIPTION   = "Material Description"
+MAT_PLANT         = "Plant"
+MAT_PLANT_NAME    = "Plant Name"
+MAT_STORAGE_LOC   = "Storage Location"
+MAT_STORAGE_DESC  = "Description of Storage Location"
+MAT_BATCH         = "Batch"
+MAT_SLED          = "Shelf Life Expiration Date"
+MAT_SPECIAL_STOCK = "Special Stock Type Description"
+MAT_UNRESTRICTED  = "Unrestricted Stock"
+MAT_QUALITY       = "Stock in Quality Inspection"
+MAT_BLOCKED       = "Blocked Stock"
+
+STOCK_COLS = [MAT_UNRESTRICTED, MAT_QUALITY, MAT_BLOCKED]
+MAT_TEXT_COLS = [MAT_MATERIAL, MAT_PLANT, MAT_STORAGE_LOC, MAT_BATCH]
+
+MASTER_PRODUCT   = "Product Number"
+MASTER_BDM_NAME  = "Brand Manager Name"
+MASTER_LAST_SELL = "Last Sell Day"
+
+# Output columns. NOTE: this report uses "Last sell day" / "Last sell date"
+# (without the "by" the overstock report uses).
+OUT_BDM           = "BDM"
 OUT_LAST_SELL_DAY = "Last sell day"
-OUT_LAST_SELL_DT = "Last sell date"
+OUT_LAST_SELL_DT  = "Last sell date"
 
 OUTPUT_COLUMNS = [
     MAT_MATERIAL,
@@ -108,9 +95,96 @@ OUTPUT_COLUMNS = [
     MAT_BLOCKED,
 ]
 
-# Date window, relative to the report run date. Stock is in scope when its
-# Shelf Life Expiration Date is on/before report_date + this many days.
+# Region -> plant codes (shared logic with overstock, duplicated to stay
+# self-contained). Sheet order is preserved on output.
+REGION_PLANTS: dict[str, list[str]] = {
+    "Mississauga": ["2910"],
+    "Calgary": ["2920", "2925"],
+    "Surrey": ["2930", "2935"],
+}
+
+# ---------------------------------------------------------------------------
+# Business-rule constants (auditable; change here, not in the UI)
+# ---------------------------------------------------------------------------
+EXCLUDED_MATERIAL_PREFIXES = ("40",)        # packaging / display / promo
+SWEET_STREET_DESC_PREFIX = "SSD"            # Sweet Street desserts brand
+RANA_DESC_PREFIX = "RANA"                   # Giovanni Rana
+RANA_EXCLUDED_BDM = "SANDRA GAGANIARAS GB"  # her RANA retail line is dropped
+
+# Date window: stock is in scope when its Shelf Life Expiration Date is
+# on/before report_date + this many days.
 SLED_CUTOFF_OFFSET_DAYS = 4
+
+
+# ---------------------------------------------------------------------------
+# Importers
+# ---------------------------------------------------------------------------
+def _read_excel_str(file_obj: Any) -> pd.DataFrame:
+    file_obj.seek(0)
+    df = pd.read_excel(file_obj, dtype=str, engine="openpyxl")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _require(df: pd.DataFrame, cols: list[str], what: str) -> None:
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise DonateDisposeError(
+            f"This doesn't look like a {what} export — missing column(s): "
+            + ", ".join(missing)
+        )
+
+
+def load_materials(file_obj: Any) -> pd.DataFrame:
+    """Read the Materials inventory export. Stock buckets become numeric, the
+    SLED becomes a datetime, and id columns are kept as clean text strings."""
+    df = _read_excel_str(file_obj)
+    _require(df, [MAT_MATERIAL, MAT_PLANT, MAT_SLED] + STOCK_COLS, "Materials")
+
+    for c in STOCK_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    df[MAT_SLED] = pd.to_datetime(df[MAT_SLED], errors="coerce")
+
+    for c in MAT_TEXT_COLS:
+        if c in df.columns:
+            # Strip only ASCII whitespace so any preserved batch padding
+            # (trailing non-breaking spaces) survives verbatim.
+            df[c] = (
+                df[c].astype(str)
+                .str.replace(r"\.0$", "", regex=True)
+                .str.strip(" \t\r\n")
+                .replace({"nan": "", "None": "", "NaT": ""})
+            )
+    return df
+
+
+def load_master(file_obj: Any) -> pd.DataFrame:
+    """Read the Last Sell / BDM master and reduce it to one row per Product
+    Number (the master repeats products across vendors)."""
+    df = _read_excel_str(file_obj)
+    _require(df, [MASTER_PRODUCT, MASTER_BDM_NAME, MASTER_LAST_SELL],
+             "Last Sell / BDM Material Master")
+
+    df[MASTER_PRODUCT] = (
+        df[MASTER_PRODUCT].astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+    )
+    df[MASTER_LAST_SELL] = pd.to_numeric(df[MASTER_LAST_SELL], errors="coerce")
+    df = df.drop_duplicates(subset=MASTER_PRODUCT, keep="first")
+    return df[[MASTER_PRODUCT, MASTER_BDM_NAME, MASTER_LAST_SELL]].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Core build
+# ---------------------------------------------------------------------------
+def _coerce_report_date(report_date: date | datetime | None) -> date:
+    if report_date is None:
+        return date.today()
+    if isinstance(report_date, datetime):
+        return report_date.date()
+    return report_date
 
 
 def default_cutoff(report_date: date | datetime | None = None) -> date:
