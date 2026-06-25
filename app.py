@@ -30,5 +30,9 @@ pg = st.navigation([
         "pages/6_Donate_Dispose_List.py",
         title="Donate / Dispose List Dashboard",
     ),
+    st.Page(
+        "pages/7_Risky_Inventory.py",
+        title="Risky Inventory Dashboard",
+    ),
 ])
 pg.run()
