@@ -22,5 +22,17 @@ pg = st.navigation([
         "pages/4_Daily_Short_Report.py",
         title="Daily Short Report Dashboard",
     ),
+    st.Page(
+        "pages/5_Overstock_Report.py",
+        title="Overstock Report Dashboard",
+    ),
+    st.Page(
+        "pages/6_Donate_Dispose_List.py",
+        title="Donate / Dispose List Dashboard",
+    ),
+    st.Page(
+        "pages/7_Risky_Inventory.py",
+        title="Risky Inventory Dashboard",
+    ),
 ])
 pg.run()
