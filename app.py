@@ -34,5 +34,9 @@ pg = st.navigation([
         "pages/7_Risky_Inventory.py",
         title="Risky Inventory Dashboard",
     ),
+    st.Page(
+        "pages/8_Batch_Quality_Analysis.py",
+        title="Batch Quality Analysis",
+    ),
 ])
 pg.run()
