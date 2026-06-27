@@ -19,6 +19,8 @@ from typing import Any
 
 import pandas as pd
 
+from .normalization import normalize_batch  # re-exported for callers/tests
+
 
 class BatchQualityError(Exception):
     """Raised when an uploaded file isn't a usable SAP receiving export."""
@@ -102,21 +104,6 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         elif canonical:
             claimed.add(canonical)
     return df.rename(columns=rename)
-
-
-def normalize_batch(value: Any) -> str:
-    """Comparison-only normalization: uppercase, drop spaces and separators
-    (hyphens/slashes/periods/underscores and any other punctuation), keep
-    letters and digits. ``31-5357`` / ``31 5357`` / ``31/5357`` -> ``315357``.
-    Never replaces the original Batch value."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    return re.sub(r"[^0-9A-Z]", "", str(value).strip().upper())
 
 
 def _clean_text(series: pd.Series, keep_spaces: bool) -> pd.Series:

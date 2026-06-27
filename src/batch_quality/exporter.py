@@ -1,14 +1,15 @@
 """Excel export for the Batch Quality Analysis dashboard.
 
-One workbook, four sheets: Flagged Issues, Related Records, Multiple Batches,
-AI Review. Bold headers, auto-filter, frozen top row, date formatting, sensible
+One workbook, three sheets: Flagged Issues, Related Records, Multiple Batches.
+The Flagged Issues sheet already contains the issue-group fields, the automatic
+AI review fields and the human findings together — there is no separate AI Review
+sheet. Bold headers, auto-filter, frozen top row, date formatting, sensible
 column widths, and id columns preserved as text. No corrected batch / expiry
 fields are ever exported.
 """
 from __future__ import annotations
 
 import io
-from typing import Optional
 
 import pandas as pd
 from openpyxl import Workbook
@@ -21,7 +22,6 @@ from .loader import (
     COL_MATERIAL,
     COL_PLANT,
     COL_PO,
-    COL_RECEIVED,
     COL_SUPPLIER,
     COL_VENDOR,
 )
@@ -32,7 +32,7 @@ _DATE_FMT = "yyyy-mm-dd"
 
 # Columns that should render and round-trip as text (ids), keyed by header name.
 _TEXT_HEADERS = {COL_VENDOR, COL_SUPPLIER, COL_PO, COL_PLANT, COL_MATERIAL, COL_BATCH}
-_DATE_HEADERS = {COL_BATCH_SLED, COL_RECEIVED, "Earliest Expiry Date", "Latest Expiry Date"}
+_DATE_HEADERS = {COL_BATCH_SLED, "Received Date", "Earliest Expiry Date", "Latest Expiry Date"}
 
 
 def _write_sheet(ws, df: pd.DataFrame) -> None:
@@ -61,7 +61,7 @@ def _write_sheet(ws, df: pd.DataFrame) -> None:
             elif isinstance(val, pd.Timestamp):
                 val = val.to_pydatetime()
             cell = ws.cell(row=r_idx, column=c_idx, value=val)
-            if c_idx in date_idx and val is not None and not (c_idx in text_idx):
+            if c_idx in date_idx and val is not None and c_idx not in text_idx:
                 cell.number_format = _DATE_FMT
             elif c_idx in text_idx:
                 cell.number_format = "@"
@@ -81,15 +81,16 @@ def generate_excel(
     flagged: pd.DataFrame,
     related: pd.DataFrame,
     multi_batch: pd.DataFrame,
-    ai_review: Optional[pd.DataFrame] = None,
 ) -> bytes:
-    """Render the four-sheet Batch Quality Analysis workbook (bytes)."""
+    """Render the three-sheet Batch Quality Analysis workbook (bytes).
+
+    ``flagged`` is the merged results table (issue-group + AI + human findings).
+    """
     wb = Workbook()
     wb.remove(wb.active)
     _write_sheet(wb.create_sheet("Flagged Issues"), flagged)
     _write_sheet(wb.create_sheet("Related Records"), related)
     _write_sheet(wb.create_sheet("Multiple Batches"), multi_batch)
-    _write_sheet(wb.create_sheet("AI Review"), ai_review if ai_review is not None else pd.DataFrame())
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

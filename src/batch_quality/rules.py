@@ -1,18 +1,23 @@
 """Rule-based batch-quality detectors.
 
-Each rule scans the normalized receiving DataFrame and returns ``RuleHit``s — a
-flag plus the original SAP row indices involved. No row is ever modified or
-deleted; the rules only *identify* records for human review. AI is not involved
-here.
+Each rule scans the normalized receiving DataFrame and returns ``RuleHit``s — an
+issue type/risk plus the original SAP row indices involved. No row is ever
+modified or deleted; the rules only *identify* records for human review. AI is
+not involved here.
 
 Rules (from the business spec):
 
-1. Same probable batch in different formats        -> Batch Format Variation (Medium)
-2. Same probable batch, conflicting expiry dates   -> Conflicting Expiry (High)
-3. Duplicate PO+Material+Batch+SLED combination    -> Duplicate Receiving (Medium)
-4. Completely identical row                         -> Exact Duplicate (High)
-5. Batch formatting concern (spaces/punct/short/…) -> Batch Format Review (Low)
-6. (analysis only) materials with >1 batch AND >1 expiry date — not an issue flag
+1. Probable same batch entered differently        -> Possible Batch Format Variation (Medium)
+2. Probable same batch, conflicting expiry dates   -> Possible Matching Batch With Conflicting Expiry Dates (High)
+3. Probable character-entry error (I/1, O/0, …)     -> Possible Character Entry Error (Medium)
+4. Same material + supplier received close together
+   with unusual batch & expiry differences         -> Material Batch and Expiry Pattern Conflict (High/Medium)
+5. Duplicate PO+Material+Batch+SLED combination     -> Duplicate Receiving Combination (Medium)
+6. Completely identical row                          -> Exact Duplicate Record (High)
+7. Batch formatting concern (spaces/punct/short/…)  -> Batch Format Review (Low)
+
+Plus an analysis-only summary of materials carrying more than one batch AND more
+than one expiry date (NOT an issue flag).
 """
 from __future__ import annotations
 
@@ -28,15 +33,24 @@ from .loader import (
     COL_MATERIAL_DESC,
     COL_PO,
     COL_RECEIVED,
+    COL_SUPPLIER,
     COL_SUPPLIER_NAME,
+    COL_VENDOR,
     NORMALIZED_BATCH,
+)
+from .normalization import (
+    MAX_CONFUSABLE_DIFFS,
+    confusable_diff_positions,
+    structures_differ_significantly,
 )
 
 # ---------------------------------------------------------------------------
 # Issue types and risk levels
 # ---------------------------------------------------------------------------
-ISSUE_FORMAT_VARIATION = "Batch Format Variation"
-ISSUE_CONFLICTING_EXPIRY = "Probable Same Batch With Conflicting Expiry Dates"
+ISSUE_FORMAT_VARIATION = "Possible Batch Format Variation"
+ISSUE_CONFLICTING_EXPIRY = "Possible Matching Batch With Conflicting Expiry Dates"
+ISSUE_CHARACTER_ENTRY = "Possible Character Entry Error"
+ISSUE_PATTERN_CONFLICT = "Material Batch and Expiry Pattern Conflict"
 ISSUE_DUPLICATE_RECEIVING = "Duplicate Receiving Combination"
 ISSUE_EXACT_DUPLICATE = "Exact Duplicate Record"
 ISSUE_FORMAT_REVIEW = "Batch Format Review"
@@ -45,6 +59,14 @@ RISK_HIGH = "High"
 RISK_MEDIUM = "Medium"
 RISK_LOW = "Low"
 RISK_ORDER = {RISK_HIGH: 0, RISK_MEDIUM: 1, RISK_LOW: 2}
+
+# Rule 4 tuning.
+CLOSE_PERIOD_DAYS = 14            # "received close together" window
+EXPIRY_SIGNIFICANT_DAYS = 180    # min expiry gap to call it significant
+EXPIRY_HIGH_RISK_DAYS = 365      # gap above which the pair is High risk
+
+# Performance guard for the character-confusion rule.
+_MAX_BATCHES_PER_LENGTH = 400
 
 
 @dataclass
@@ -65,10 +87,9 @@ def _nonblank(series: pd.Series) -> pd.Series:
 # Rule 1 + 2: same normalized batch, grouped by Material
 # ---------------------------------------------------------------------------
 def rule_batch_groups(df: pd.DataFrame) -> list[RuleHit]:
-    """Group by Material + Normalized Batch. If the group has more than one
-    distinct nonblank Batch SLED -> conflicting expiry (High, Rule 2). Else if
-    it has more than one original Batch format -> format variation (Medium,
-    Rule 1)."""
+    """Group by Material + Normalized Batch. More than one distinct nonblank
+    Batch SLED -> conflicting expiry (High, Rule 2). Else more than one original
+    Batch format -> format variation (Medium, Rule 1)."""
     hits: list[RuleHit] = []
     has_sled = COL_BATCH_SLED in df.columns
     sub = df[df[COL_BATCH].astype(str).str.strip() != ""]
@@ -83,14 +104,15 @@ def rule_batch_groups(df: pd.DataFrame) -> list[RuleHit]:
             dates = sorted(pd.Timestamp(d).strftime("%Y-%m-%d") for d in distinct_dates)
             hits.append(RuleHit(
                 ISSUE_CONFLICTING_EXPIRY, RISK_HIGH,
-                f"Material {material}: normalized batch {nb} appears with "
-                f"conflicting expiry dates {dates} across formats {formats}.",
+                f"Material {material}: a probable matching batch ({nb}) is represented "
+                f"with more than one expiry date {dates} across formats {formats} and "
+                "requires document verification.",
                 list(g.index),
             ))
         elif len(formats) > 1:
             hits.append(RuleHit(
                 ISSUE_FORMAT_VARIATION, RISK_MEDIUM,
-                f"Material {material}: normalized batch {nb} entered in "
+                f"Material {material}: probable same batch {nb} entered in "
                 f"{len(formats)} different formats {formats}.",
                 list(g.index),
             ))
@@ -98,7 +120,127 @@ def rule_batch_groups(df: pd.DataFrame) -> list[RuleHit]:
 
 
 # ---------------------------------------------------------------------------
-# Rule 3: duplicate receiving combination
+# Rule 3: probable character-entry error (I/1, O/0, S/5, B/8, Z/2, G/6)
+# ---------------------------------------------------------------------------
+def rule_character_entry(df: pd.DataFrame) -> list[RuleHit]:
+    """Within a Material, two batch values of the same length that differ only
+    by commonly-confused characters (e.g. ``NI8D61`` vs ``N18D61``) are flagged
+    for review. Comparison uses the normalized batch so punctuation/casing don't
+    create false differences. Never declares which value is correct."""
+    hits: list[RuleHit] = []
+    sub = df[df[NORMALIZED_BATCH].astype(str).str.strip() != ""]
+    for material, g in sub.groupby(COL_MATERIAL):
+        norm_to_idx: dict[str, list] = {}
+        norm_to_orig: dict[str, str] = {}
+        for idx, nb, orig in zip(g.index, g[NORMALIZED_BATCH], g[COL_BATCH]):
+            nb = str(nb)
+            norm_to_idx.setdefault(nb, []).append(idx)
+            norm_to_orig.setdefault(nb, str(orig).strip())
+        norms = list(norm_to_idx)
+        if len(norms) < 2:
+            continue
+        by_len: dict[int, list[str]] = {}
+        for nb in norms:
+            by_len.setdefault(len(nb), []).append(nb)
+        seen: set = set()
+        for length, bucket in by_len.items():
+            if length == 0 or len(bucket) > _MAX_BATCHES_PER_LENGTH:
+                continue
+            for i in range(len(bucket)):
+                for j in range(i + 1, len(bucket)):
+                    a, b = bucket[i], bucket[j]
+                    diffs = confusable_diff_positions(a, b)
+                    if diffs is None or len(diffs) > MAX_CONFUSABLE_DIFFS:
+                        continue
+                    key = frozenset((a, b))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    idxs = sorted(set(norm_to_idx[a] + norm_to_idx[b]))
+                    hits.append(RuleHit(
+                        ISSUE_CHARACTER_ENTRY, RISK_MEDIUM,
+                        f"Material {material}: batch values "
+                        f"{norm_to_orig[a]!r} and {norm_to_orig[b]!r} are highly similar "
+                        "and differ by a character commonly confused during label "
+                        "reading or manual entry.",
+                        idxs,
+                    ))
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# Rule 4: same material + supplier received close together with unusual
+# batch-structure and expiry differences
+# ---------------------------------------------------------------------------
+def rule_pattern_conflict(
+    df: pd.DataFrame,
+    window_days: int = CLOSE_PERIOD_DAYS,
+    expiry_days: int = EXPIRY_SIGNIFICANT_DAYS,
+) -> list[RuleHit]:
+    """Compare records sharing Material + Supplier (or Vendor) received within a
+    close period. Flag a pair whose batch structures differ significantly AND
+    whose expiry dates differ significantly — a possible inconsistent receipt or
+    mixed-up lot. Does not decide which record is correct."""
+    if COL_BATCH_SLED not in df.columns or COL_RECEIVED not in df.columns:
+        return []
+    skey = COL_SUPPLIER if COL_SUPPLIER in df.columns else (
+        COL_VENDOR if COL_VENDOR in df.columns else None
+    )
+    if skey is None:
+        return []
+
+    mask = (
+        df[COL_RECEIVED].notna()
+        & df[COL_BATCH_SLED].notna()
+        & (df[COL_BATCH].astype(str).str.strip() != "")
+        & (df[skey].astype(str).str.strip() != "")
+    )
+    sub = df[mask]
+    hits: list[RuleHit] = []
+    for (material, supplier), grp in sub.groupby([COL_MATERIAL, skey]):
+        if len(grp) < 2:
+            continue
+        g = grp.sort_values(COL_RECEIVED)
+        idx = list(g.index)
+        norms = [str(v) for v in g[NORMALIZED_BATCH]]
+        origs = [str(v).strip() for v in g[COL_BATCH]]
+        sleds = list(g[COL_BATCH_SLED])
+        recvs = list(g[COL_RECEIVED])
+        n = len(idx)
+        seen: set = set()
+        for i in range(n):
+            for j in range(i + 1, n):
+                dr = abs((recvs[j] - recvs[i]).days)
+                if dr > window_days:
+                    break  # sorted by received date — no closer pair beyond j
+                if norms[i] == norms[j]:
+                    continue
+                if not structures_differ_significantly(norms[i], norms[j]):
+                    continue
+                de = abs((sleds[j] - sleds[i]).days)
+                if de < expiry_days:
+                    continue
+                pair = tuple(sorted((idx[i], idx[j])))
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                risk = RISK_HIGH if de > EXPIRY_HIGH_RISK_DAYS else RISK_MEDIUM
+                hits.append(RuleHit(
+                    ISSUE_PATTERN_CONFLICT, risk,
+                    f"Material {material}: the same material and supplier were received "
+                    f"within {dr} day(s), but batch values {origs[i]!r} "
+                    f"(expiry {pd.Timestamp(sleds[i]):%Y-%m-%d}) and {origs[j]!r} "
+                    f"(expiry {pd.Timestamp(sleds[j]):%Y-%m-%d}) have significantly "
+                    "different structures and expiry dates. Review whether these "
+                    "represent valid separate production lots or inconsistent "
+                    "receiving data.",
+                    list(pair),
+                ))
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# Rule 5: duplicate receiving combination
 # ---------------------------------------------------------------------------
 def rule_duplicate_receiving(df: pd.DataFrame) -> list[RuleHit]:
     keys = [c for c in (COL_PO, COL_MATERIAL, COL_BATCH, COL_BATCH_SLED) if c in df.columns]
@@ -122,7 +264,7 @@ def rule_duplicate_receiving(df: pd.DataFrame) -> list[RuleHit]:
 
 
 # ---------------------------------------------------------------------------
-# Rule 4: exact duplicate row
+# Rule 6: exact duplicate row
 # ---------------------------------------------------------------------------
 def rule_exact_duplicate(df: pd.DataFrame) -> list[RuleHit]:
     src_cols = [c for c in df.columns if c != NORMALIZED_BATCH]
@@ -142,7 +284,7 @@ def rule_exact_duplicate(df: pd.DataFrame) -> list[RuleHit]:
 
 
 # ---------------------------------------------------------------------------
-# Rule 5: batch formatting concern (per distinct Material+Batch)
+# Rule 7: batch formatting concern (per distinct Material+Batch)
 # ---------------------------------------------------------------------------
 def _format_concerns(batch: object) -> list[str]:
     if batch is None:
@@ -185,9 +327,11 @@ def rule_format_review(df: pd.DataFrame) -> list[RuleHit]:
 
 
 def run_all_rules(df: pd.DataFrame) -> list[RuleHit]:
-    """Run every rule (1–5) and return all hits."""
+    """Run every rule (1–7) and return all hits."""
     return (
         rule_batch_groups(df)
+        + rule_character_entry(df)
+        + rule_pattern_conflict(df)
         + rule_duplicate_receiving(df)
         + rule_exact_duplicate(df)
         + rule_format_review(df)
@@ -195,7 +339,7 @@ def run_all_rules(df: pd.DataFrame) -> list[RuleHit]:
 
 
 # ---------------------------------------------------------------------------
-# Rule 6 (analysis only): materials with multiple batches AND multiple dates
+# Analysis only: materials with multiple batches AND multiple dates
 # ---------------------------------------------------------------------------
 MULTI_BATCH_COLUMNS = [
     "Material", "Material Description", "Supplier Name",
