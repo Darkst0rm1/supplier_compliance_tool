@@ -157,6 +157,18 @@ def render() -> None:
         unavailable_label=("Not Available" if not ai_ready else "Not Reviewed"),
     )
 
+    if ai_ready and not flagged.empty:
+        reviewed = sum(1 for v in ai_map.values() if isinstance(v, ai.AIReviewResult))
+        capped = sum(1 for v in ai_map.values() if v == "skipped")
+        if capped:
+            st.caption(
+                f"AI reviewed the {reviewed} highest-risk issue groups; {capped} "
+                "lower-risk groups were not auto-reviewed (limit). Set "
+                "`BATCH_QUALITY_MAX_AI_ISSUES` (e.g. `all`) to change."
+            )
+        else:
+            st.caption(f"AI reviewed all {reviewed} issue groups.")
+
     tab_summary, tab_flagged, tab_history, tab_results = st.tabs([
         "Upload & Summary", "Flagged Issues", "Material Batch History", "Review Results",
     ])

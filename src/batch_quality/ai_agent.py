@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import Any, Callable, Literal, Optional
 
 import pandas as pd
@@ -38,9 +40,12 @@ DEFAULT_MODEL = "claude-opus-4-8"
 MAX_CONTEXT_RECORDS = 40
 
 # Default cap on how many issue groups the agent reviews automatically (highest
-# risk first). Protects against runaway cost on very large exports. Overridable
-# via BATCH_QUALITY_MAX_AI_ISSUES.
-DEFAULT_MAX_AI_ISSUES = 100
+# risk first). Protects against runaway cost/time on very large exports.
+# Overridable via BATCH_QUALITY_MAX_AI_ISSUES.
+DEFAULT_MAX_AI_ISSUES = 25
+
+# How many AI calls run concurrently. Overridable via BATCH_QUALITY_AI_CONCURRENCY.
+DEFAULT_AI_CONCURRENCY = 8
 
 
 class AIReviewResult(BaseModel):
@@ -130,6 +135,16 @@ def get_max_issues() -> Optional[int]:
         return DEFAULT_MAX_AI_ISSUES
 
 
+def get_concurrency() -> int:
+    raw = os.environ.get("BATCH_QUALITY_AI_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_AI_CONCURRENCY
+    try:
+        return max(1, int(raw.strip()))
+    except ValueError:
+        return DEFAULT_AI_CONCURRENCY
+
+
 def _records_to_list(df: pd.DataFrame, limit: Optional[int] = None) -> list[dict]:
     if df is None or df.empty:
         return []
@@ -211,16 +226,20 @@ def run_agent(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     max_issues: Optional[int] = None,
+    concurrency: Optional[int] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """Automatically review the issue groups (highest risk first), caching by
     fingerprint. Returns a map Issue Group ID -> AIReviewResult for reviewed
     groups, or the sentinel ``"skipped"`` for groups beyond ``max_issues``.
 
+    Uncached groups are reviewed concurrently (``concurrency`` worker threads;
+    the Anthropic SDK is HTTP/IO-bound, so threads parallelize the API latency).
     Groups already in ``cache`` (keyed by fingerprint) are reused without a new
     API call. ``related`` is unused directly but kept for signature symmetry.
     """
     cache = cache if cache is not None else {}
+    workers = concurrency if concurrency is not None else get_concurrency()
     df = result.df
     flagged = result.flagged
     ai_map: dict = {}
@@ -228,54 +247,66 @@ def run_agent(
         return ai_map
 
     gids = list(flagged["Issue Group ID"])
-    # Count groups that still need a real call (for the caller's progress bar).
-    total = len(gids) if max_issues is None else min(len(gids), max_issues)
-    done = 0
-    attempted = 0
-    ok = 0
-    first_error: Optional[Exception] = None
-    for n, gid in enumerate(gids):
-        if max_issues is not None and n >= max_issues:
-            ai_map[gid] = "skipped"
-            continue
+    in_scope = gids if max_issues is None else gids[:max_issues]
+    for gid in gids[len(in_scope):]:
+        ai_map[gid] = "skipped"
+
+    total = len(in_scope)
+    cached_ok = 0
+    pending: list[tuple[str, str, dict]] = []  # (gid, fingerprint, context)
+    for gid in in_scope:
         idx = result.members.get(gid, [])
         related_records = df.loc[idx]
         row = flagged[flagged["Issue Group ID"] == gid].iloc[0]
         fp = issue_fingerprint(row["Issue Type"], related_records)
         if fp in cache:
             ai_map[gid] = cache[fp]
-            done += 1
-            ok += 1
-            if progress_cb:
-                progress_cb(done, total)
+            cached_ok += 1
             continue
-
         mat = related_records["Material"].iloc[0] \
             if "Material" in df.columns and not related_records.empty else None
         material_records = df[df["Material"] == mat] if mat is not None else df.iloc[0:0]
         nbs = [v for v in related_records[NORMALIZED_BATCH].unique() if str(v).strip()] \
             if NORMALIZED_BATCH in related_records.columns else []
         normbatch_records = df[df[NORMALIZED_BATCH].isin(nbs)] if nbs else df.iloc[0:0]
-
         context = build_ai_context(row.to_dict(), related_records, material_records, normbatch_records)
-        attempted += 1
-        try:
-            review = review_issue(context, api_key=api_key, model=model)
-        except Exception as exc:  # noqa: BLE001 — tolerate a single bad group
-            if first_error is None:
-                first_error = exc
-            ai_map[gid] = None
-        else:
-            cache[fp] = review
-            ai_map[gid] = review
-            ok += 1
-        done += 1
-        if progress_cb:
-            progress_cb(done, total)
+        pending.append((gid, fp, context))
 
-    # Systemic failure (e.g. bad credentials): surface it. Partial failures are
-    # tolerated — those groups simply show no AI result.
-    if attempted and ok == 0 and first_error is not None:
+    done = cached_ok
+    if progress_cb and total:
+        progress_cb(done, total)
+
+    new_ok = 0
+    first_error: Optional[Exception] = None
+    if pending:
+        lock = Lock()
+        with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
+            futures = {
+                pool.submit(review_issue, ctx, api_key, model): (gid, fp)
+                for gid, fp, ctx in pending
+            }
+            for fut in as_completed(futures):
+                gid, fp = futures[fut]
+                try:
+                    review = fut.result()
+                except Exception as exc:  # noqa: BLE001 — tolerate a single bad group
+                    with lock:
+                        if first_error is None:
+                            first_error = exc
+                        ai_map[gid] = None
+                else:
+                    with lock:
+                        cache[fp] = review
+                        ai_map[gid] = review
+                        new_ok += 1
+                with lock:
+                    done += 1
+                    if progress_cb:
+                        progress_cb(done, total)
+
+    # Systemic failure (e.g. bad credentials): every actual API call failed and
+    # nothing was served from cache. Surface it. Partial failures are tolerated.
+    if pending and new_ok == 0 and cached_ok == 0 and first_error is not None:
         raise first_error
     return ai_map
 

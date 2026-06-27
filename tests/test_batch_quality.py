@@ -412,6 +412,61 @@ def test_run_agent_caps_and_caches(monkeypatch):
     assert calls["n"] == 1
 
 
+def _fake_result(**over):
+    base = dict(
+        ai_review_priority="Medium", review_summary="s", pattern_identified="p",
+        reason_for_review="r", recurring_pattern="n", records_involved="2",
+        documents_to_verify=["ASN"], possible_root_causes=["entry"],
+        recommended_review_steps=["check"], questions_for_supplier_or_receiver=["q"],
+        review_note="note",
+    )
+    base.update(over)
+    return ai_agent.AIReviewResult(**base)
+
+
+def test_run_agent_reviews_all_groups_concurrently(monkeypatch):
+    import threading
+    df = make_df([
+        {"material": "M1", "batch": "ABC1", "sled": "2027-01-09", "po": "PO1"},
+        {"material": "M1", "batch": "ABC1", "sled": "2027-02-09", "po": "PO2"},
+        {"material": "M2", "batch": "31-5357", "sled": "2027-03-01", "po": "PO3"},
+        {"material": "M2", "batch": "315357", "sled": "2027-03-01", "po": "PO4"},
+    ])
+    result = analyze(df)
+    related = build_related_records(result)
+    lock = threading.Lock()
+    calls = {"n": 0}
+
+    def fake_review(context, api_key=None, model=None):
+        with lock:
+            calls["n"] += 1
+        return _fake_result()
+
+    monkeypatch.setattr(ai_agent, "review_issue", fake_review)
+    ai_map = ai_agent.run_agent(result, related, cache={}, api_key="sk-test",
+                                max_issues=None, concurrency=4)
+    n_groups = result.summary["total_issue_groups"]
+    assert calls["n"] == n_groups
+    assert all(isinstance(v, ai_agent.AIReviewResult) for v in ai_map.values())
+    assert len(ai_map) == n_groups
+
+
+def test_run_agent_raises_on_total_failure(monkeypatch):
+    df = make_df([
+        {"material": "M1", "batch": "ABC1", "sled": "2027-01-09", "po": "PO1"},
+        {"material": "M1", "batch": "ABC1", "sled": "2027-02-09", "po": "PO2"},
+    ])
+    result = analyze(df)
+    related = build_related_records(result)
+
+    def boom(context, api_key=None, model=None):
+        raise RuntimeError("invalid x-api-key")
+
+    monkeypatch.setattr(ai_agent, "review_issue", boom)
+    with pytest.raises(RuntimeError):
+        ai_agent.run_agent(result, related, cache={}, api_key="bad", concurrency=4)
+
+
 # ---------------------------------------------------------------------------
 # Results table merge (AI + human findings)
 # ---------------------------------------------------------------------------
