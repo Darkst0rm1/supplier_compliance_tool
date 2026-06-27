@@ -372,10 +372,64 @@ def test_ai_fingerprint_stable_and_record_sensitive():
 def test_ai_config_helpers(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("BATCH_QUALITY_LLM_BASE_URL", raising=False)
+    assert ai_agent.get_backend() == "anthropic"
     assert ai_agent.get_model() == ai_agent.DEFAULT_MODEL
     assert ai_agent.get_model("claude-sonnet-4-6") == "claude-sonnet-4-6"
     assert ai_agent.is_ai_configured() is False
     assert ai_agent.is_ai_configured("sk-test") is True
+
+
+def test_openai_backend_switches_with_env(monkeypatch):
+    monkeypatch.setenv("BATCH_QUALITY_LLM_BASE_URL", "https://router.huggingface.co/v1")
+    monkeypatch.setenv("BATCH_QUALITY_LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    assert ai_agent.get_backend() == "openai"
+    assert ai_agent.get_model() == "meta-llama/Llama-3.1-8B-Instruct"
+    assert ai_agent.is_ai_configured() is True  # base URL alone is enough (Ollama needs no key)
+
+
+def test_extract_json_variants():
+    assert ai_agent._extract_json('{"a": 1}') == '{"a": 1}'
+    assert ai_agent._extract_json('```json\n{"a": 1}\n```') == '{"a": 1}'
+    assert ai_agent._extract_json('Sure! {"a": 1} hope that helps') == '{"a": 1}'
+
+
+def test_review_via_openai_parses_response(monkeypatch):
+    import json as _json
+    import requests
+    monkeypatch.setenv("BATCH_QUALITY_LLM_BASE_URL", "https://router.huggingface.co/v1")
+    monkeypatch.setenv("BATCH_QUALITY_LLM_API_KEY", "hf_test")
+    monkeypatch.setenv("BATCH_QUALITY_LLM_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+    body = {
+        "ai_review_priority": "Low", "review_summary": "s", "pattern_identified": "p",
+        "reason_for_review": "r", "recurring_pattern": "n", "records_involved": "2",
+        "documents_to_verify": ["ASN"], "possible_root_causes": ["entry"],
+        "recommended_review_steps": ["check"], "questions_for_supplier_or_receiver": ["q"],
+        "review_note": "note",
+    }
+
+    class FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "```json\n" + _json.dumps(body) + "\n```"}}]}
+
+    captured: dict = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, headers=headers, payload=json)
+        return FakeResp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    res = ai_agent.review_issue({"issue_group": {}})
+    assert isinstance(res, ai_agent.AIReviewResult)
+    assert res.ai_review_priority == "Low"
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["headers"]["Authorization"] == "Bearer hf_test"
+    assert captured["payload"]["model"] == "meta-llama/Llama-3.1-8B-Instruct"
 
 
 def test_run_agent_caps_and_caches(monkeypatch):

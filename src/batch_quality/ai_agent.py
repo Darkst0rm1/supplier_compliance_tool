@@ -33,7 +33,10 @@ from pydantic import BaseModel
 
 from .loader import NORMALIZED_BATCH
 
-DEFAULT_MODEL = "claude-opus-4-8"
+# Haiku is the default: this dashboard makes many small "explain why this was
+# flagged" calls, where a fast, inexpensive model is the right fit. Override with
+# ANTHROPIC_MODEL (e.g. claude-opus-4-8) for deeper reviews.
+DEFAULT_MODEL = "claude-haiku-4-5"
 
 # Cap how many context records we send the AI — it reviews the issue group, not
 # the whole workbook.
@@ -46,6 +49,32 @@ DEFAULT_MAX_AI_ISSUES = 25
 
 # How many AI calls run concurrently. Overridable via BATCH_QUALITY_AI_CONCURRENCY.
 DEFAULT_AI_CONCURRENCY = 8
+
+# --- Pluggable backend ------------------------------------------------------
+# Default backend is Anthropic. Set BATCH_QUALITY_LLM_BASE_URL to use any
+# OpenAI-compatible endpoint instead (free options: Hugging Face router, Groq,
+# Ollama local, OpenRouter). Then also set BATCH_QUALITY_LLM_MODEL and, unless
+# the endpoint needs no auth (e.g. local Ollama), BATCH_QUALITY_LLM_API_KEY
+# (HF_TOKEN is accepted as a fallback for the Hugging Face router).
+#
+#   Hugging Face:  BASE_URL=https://router.huggingface.co/v1   key=hf_...   model=meta-llama/Llama-3.1-8B-Instruct
+#   Groq:          BASE_URL=https://api.groq.com/openai/v1      key=gsk_...  model=llama-3.3-70b-versatile
+#   Ollama (local):BASE_URL=http://localhost:11434/v1           key=(none)   model=llama3.1
+#   OpenRouter:    BASE_URL=https://openrouter.ai/api/v1        key=sk-or-.. model=...:free
+DEFAULT_OPENAI_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+OPENAI_REQUEST_TIMEOUT = 120
+
+
+def get_backend() -> str:
+    """``"openai"`` when an OpenAI-compatible base URL is configured, else
+    ``"anthropic"`` (the default)."""
+    return "openai" if os.environ.get("BATCH_QUALITY_LLM_BASE_URL") else "anthropic"
+
+
+def _openai_config() -> tuple[str, str]:
+    base = os.environ.get("BATCH_QUALITY_LLM_BASE_URL", "").rstrip("/")
+    key = os.environ.get("BATCH_QUALITY_LLM_API_KEY") or os.environ.get("HF_TOKEN") or ""
+    return base, key
 
 
 class AIReviewResult(BaseModel):
@@ -115,10 +144,18 @@ def get_api_key(override: Optional[str] = None) -> Optional[str]:
 
 
 def get_model(override: Optional[str] = None) -> str:
-    return override or os.environ.get("ANTHROPIC_MODEL") or DEFAULT_MODEL
+    if override:
+        return override
+    if get_backend() == "openai":
+        return os.environ.get("BATCH_QUALITY_LLM_MODEL") or DEFAULT_OPENAI_MODEL
+    return os.environ.get("ANTHROPIC_MODEL") or DEFAULT_MODEL
 
 
 def is_ai_configured(api_key: Optional[str] = None) -> bool:
+    if get_backend() == "openai":
+        # A base URL is enough (local Ollama needs no key); a key is required
+        # only for hosted providers, which is enforced by the call itself.
+        return bool(os.environ.get("BATCH_QUALITY_LLM_BASE_URL"))
     return bool(get_api_key(api_key))
 
 
@@ -193,29 +230,143 @@ def issue_fingerprint(issue_type: str, related_records: pd.DataFrame) -> str:
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
+_USER_PREFIX = (
+    "Review this SAP batch / expiry-date data-quality concern. Base your "
+    "response only on the records provided.\n\n"
+)
+
+
 def review_issue(
     context: dict,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
 ) -> AIReviewResult:
-    """Call Claude to review one issue group and return validated structured
-    output. ``context`` is the dict from :func:`build_ai_context`."""
+    """Review one issue group and return validated structured output. Dispatches
+    to the configured backend (Anthropic by default, otherwise any
+    OpenAI-compatible endpoint). ``context`` is from :func:`build_ai_context`."""
+    if get_backend() == "openai":
+        return _review_via_openai(context, model=model)
+
     import anthropic  # lazy — keep the module importable without the dependency
 
     client = anthropic.Anthropic(api_key=get_api_key(api_key))
-    user_content = (
-        "Review this SAP batch / expiry-date data-quality concern. Base your "
-        "response only on the records provided.\n\n"
-        + json.dumps(context, indent=2, default=str)
-    )
     response = client.messages.parse(
         model=get_model(model),
         max_tokens=4096,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[{"role": "user", "content": _USER_PREFIX + json.dumps(context, indent=2, default=str)}],
         output_format=AIReviewResult,
     )
     return response.parsed_output
+
+
+def _extract_json(text: str) -> str:
+    """Pull the first JSON object out of a model response (tolerates ```json
+    fences and surrounding prose from less strict models)."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t[3:]
+        if t[:4].lower() == "json":
+            t = t[4:]
+        t = t.split("```", 1)[0].strip()
+    start = t.find("{")
+    if start == -1:
+        return t
+    depth = 0
+    for i in range(start, len(t)):
+        if t[i] == "{":
+            depth += 1
+        elif t[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return t[start:i + 1]
+    return t[start:]
+
+
+def _field_guide() -> str:
+    """Concise per-field instruction derived from the schema. Lighter-weight than
+    dumping the raw JSON schema, which weaker models tend to echo back verbatim."""
+    import typing
+    lines = []
+    for name, field in AIReviewResult.model_fields.items():
+        ann = field.annotation
+        origin = typing.get_origin(ann)
+        if origin is list:
+            kind = "array of short strings"
+        elif origin is typing.Literal:
+            kind = "one of " + ", ".join(repr(a) for a in typing.get_args(ann))
+        else:
+            kind = "string"
+        lines.append(f'  "{name}": {kind}')
+    return "\n".join(lines)
+
+
+def _example_object() -> str:
+    """A filled-in example so the model returns VALUES, not the schema."""
+    return json.dumps({
+        "ai_review_priority": "Medium",
+        "review_summary": "<one short paragraph>",
+        "pattern_identified": "<the pattern across the records>",
+        "reason_for_review": "<why it needs review>",
+        "recurring_pattern": "<does it repeat? brief>",
+        "records_involved": "<count / which records>",
+        "documents_to_verify": ["<doc 1>", "<doc 2>"],
+        "possible_root_causes": ["<cause 1>", "<cause 2>"],
+        "recommended_review_steps": ["<step 1>", "<step 2>"],
+        "questions_for_supplier_or_receiver": ["<question 1>"],
+        "review_note": "<concise note>",
+    }, indent=2)
+
+
+def _review_via_openai(context: dict, model: Optional[str] = None) -> AIReviewResult:
+    """Review one issue group via an OpenAI-compatible chat-completions endpoint
+    (Hugging Face router, Groq, Ollama, OpenRouter, …). Requests JSON output and
+    validates it against :class:`AIReviewResult`, with one corrective retry."""
+    import requests  # lazy
+
+    base_url, key = _openai_config()
+    if not base_url:
+        raise RuntimeError("BATCH_QUALITY_LLM_BASE_URL is not set.")
+    system = (
+        SYSTEM_PROMPT
+        + "\n\nRespond with ONLY a single JSON object containing EXACTLY these keys "
+        "with these value types (no prose, no markdown, do NOT return the schema "
+        "itself, fill in real values):\n" + _field_guide()
+        + "\n\nExample of the expected shape (replace the placeholder values):\n"
+        + _example_object()
+    )
+    user = _USER_PREFIX + json.dumps(context, indent=2, default=str)
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": user}]
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    url = f"{base_url}/chat/completions"
+
+    def _call(msgs, use_json_format=True):
+        payload = {"model": model or get_model(), "messages": msgs,
+                   "max_tokens": 4096, "temperature": 0}
+        if use_json_format:
+            payload["response_format"] = {"type": "json_object"}
+        resp = requests.post(url, json=payload, headers=headers, timeout=OPENAI_REQUEST_TIMEOUT)
+        if resp.status_code >= 400 and use_json_format:
+            # Some models/providers reject response_format — retry without it.
+            payload.pop("response_format", None)
+            resp = requests.post(url, json=payload, headers=headers, timeout=OPENAI_REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    content = _call(messages)
+    try:
+        return AIReviewResult.model_validate_json(_extract_json(content))
+    except Exception:  # noqa: BLE001 — one corrective retry for weaker models
+        messages.append({"role": "assistant", "content": content})
+        messages.append({"role": "user", "content": (
+            "That was not valid. Return ONLY the JSON object with the exact keys "
+            "listed, filled with real values for this issue — not the schema."
+        )})
+        content = _call(messages)
+        return AIReviewResult.model_validate_json(_extract_json(content))
 
 
 def run_agent(

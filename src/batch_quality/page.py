@@ -9,6 +9,7 @@ Summary, Flagged Issues, Material Batch History, Review Results.
 from __future__ import annotations
 
 import io
+import os
 
 import pandas as pd
 import streamlit as st
@@ -78,6 +79,33 @@ def _resolve_api_key() -> str | None:
         return None
 
 
+# Maps keys in a [batch_quality] secrets section to the env vars the backend reads.
+_SECRET_ENV_MAP = {
+    "llm_base_url": "BATCH_QUALITY_LLM_BASE_URL",
+    "llm_api_key": "BATCH_QUALITY_LLM_API_KEY",
+    "llm_model": "BATCH_QUALITY_LLM_MODEL",
+    "max_ai_issues": "BATCH_QUALITY_MAX_AI_ISSUES",
+    "ai_concurrency": "BATCH_QUALITY_AI_CONCURRENCY",
+}
+
+
+def _load_secrets_into_env() -> None:
+    """Bridge Streamlit secrets -> environment so the AI backend config works on
+    Streamlit Cloud, where you set Secrets (TOML) rather than shell env vars.
+    A real env var always wins; a ``[batch_quality]`` secrets section fills the rest."""
+    try:
+        section = st.secrets.get("batch_quality", {})  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return
+    for skey, envname in _SECRET_ENV_MAP.items():
+        try:
+            val = section.get(skey)
+        except Exception:  # noqa: BLE001
+            val = None
+        if val and not os.environ.get(envname):
+            os.environ[envname] = str(val)
+
+
 def render() -> None:
     st.title("Batch Quality Analysis")
     st.caption(
@@ -89,6 +117,7 @@ def render() -> None:
 
     st.session_state.setdefault(_REVIEW_KEY, {})
     st.session_state.setdefault(_AI_CACHE_KEY, {})
+    _load_secrets_into_env()
 
     uploaded = st.file_uploader("SAP receiving-history export (.xlsx)", type=["xlsx"], key="bq_upload")
     if uploaded is None:
@@ -105,7 +134,8 @@ def render() -> None:
         return
 
     api_key = _resolve_api_key()
-    ai_ready = bool(api_key)
+    ai_ready = ai.is_ai_configured(api_key)
+    backend = ai.get_backend()
 
     with st.status("Processing batch quality file…", expanded=True) as status:
         status.write("Loading file…")
@@ -124,11 +154,15 @@ def render() -> None:
 
         ai_map: dict = {}
         if not ai_ready:
-            status.write("AI review agent unavailable — set `ANTHROPIC_API_KEY`. Running rule-based checks only.")
+            status.write(
+                "AI review agent unavailable — set `ANTHROPIC_API_KEY`, or point "
+                "`BATCH_QUALITY_LLM_BASE_URL` at a free OpenAI-compatible endpoint "
+                "(Hugging Face / Groq / Ollama). Running rule-based checks only."
+            )
         elif result.flagged.empty:
             status.write("No issue groups to review with AI.")
         else:
-            status.write("Running AI review agent on issue groups…")
+            status.write(f"Running AI review agent ({backend}: {ai.get_model()}) on issue groups…")
             bar = st.progress(0.0)
             max_issues = ai.get_max_issues()
 
