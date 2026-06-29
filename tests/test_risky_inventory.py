@@ -209,3 +209,12 @@ def test_template_asset_is_valid_and_data_clean():
     cdef = zipfile.ZipFile(TEMPLATE_PATH).read(
         "xl/pivotCache/pivotCacheDefinition1.xml").decode()
     assert "10001334" not in cdef
+
+
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
+def test_page_renders_without_exception():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file("pages/7_Risky_Inventory.py", default_timeout=30).run()
+    assert not at.exception
