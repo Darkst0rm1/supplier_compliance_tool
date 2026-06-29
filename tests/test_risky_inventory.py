@@ -6,20 +6,25 @@ depend on the supplied sample files.
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import date, datetime
 
 import openpyxl
 import pytest
 
 from src.risky_inventory_engine import (
+    BUCKET_0_90,
+    BUCKET_91_180,
+    BUCKET_NONE,
     DETAIL_HEADERS,
     GRAND_TOTAL_LABEL,
     SUMMARY_HEADER,
     RiskyInventoryError,
+    assign_buckets,
     build_summary,
+    bucket_for,
+    compute_cutoff,
     generate_excel,
     load_detail,
-    remove_duplicate_rows,
 )
 
 
@@ -118,49 +123,6 @@ def test_load_detail_skips_blank_rows():
 
 
 # ---------------------------------------------------------------------------
-# remove_duplicate_rows
-# ---------------------------------------------------------------------------
-def test_already_cleaned_file_unchanged():
-    d90 = load_detail(_make_xlsx([_make_row(Material="A"), _make_row(Material="B")]))
-    d180 = load_detail(_make_xlsx([_make_row(Material="C"), _make_row(Material="D")]))
-    clean = remove_duplicate_rows(d90, d180)
-    assert clean.rows == d180.rows
-
-
-def test_cumulative_file_drops_exactly_the_90day_rows_in_order():
-    r90 = [_make_row(Material="A"), _make_row(Material="B")]
-    r180_only = [_make_row(Material="C"), _make_row(Material="D"), _make_row(Material="E")]
-    d90 = load_detail(_make_xlsx(r90))
-    # cumulative repeats the 90-day rows first, then its own
-    cumulative = load_detail(_make_xlsx(r90 + r180_only))
-    clean = remove_duplicate_rows(d90, cumulative)
-    expected = load_detail(_make_xlsx(r180_only))
-    assert clean.rows == expected.rows  # order preserved, only own rows remain
-
-
-def test_same_material_different_batch_not_treated_as_duplicate():
-    r90 = [_make_row(Material="A", Batch="B1")]
-    d90 = load_detail(_make_xlsx(r90))
-    d180 = load_detail(_make_xlsx([
-        _make_row(Material="A", Batch="B1"),   # exact dup -> removed
-        _make_row(Material="A", Batch="B2"),   # same material, diff batch -> kept
-    ]))
-    clean = remove_duplicate_rows(d90, d180)
-    assert len(clean) == 1
-    assert clean.rows[0][DETAIL_HEADERS.index("Batch")] == "B2"
-
-
-def test_int_float_whitespace_and_date_normalisation_match():
-    d90 = load_detail(_make_xlsx([_make_row(Quantity=10, Material="A")]))
-    # same row but quantity as float and a trailing space on a text field
-    d180 = load_detail(_make_xlsx([
-        _make_row(Quantity=10.0, Material="A ", )
-    ]))
-    clean = remove_duplicate_rows(d90, d180)
-    assert len(clean) == 0
-
-
-# ---------------------------------------------------------------------------
 # build_summary
 # ---------------------------------------------------------------------------
 def test_summary_structure_grouping_sort_and_grand_total():
@@ -204,16 +166,15 @@ def test_summary_value_tie_breaks_by_group_name_ascending():
 # ---------------------------------------------------------------------------
 def test_generate_excel_sheet_order_and_detail_preserved():
     d90 = load_detail(_make_xlsx([_make_row(Material="A")]))
-    d180 = load_detail(_make_xlsx([_make_row(Material="A"), _make_row(Material="Z")]))
-    clean = remove_duplicate_rows(d90, d180)
+    d180_clean = load_detail(_make_xlsx([_make_row(Material="Z")]))
 
-    data = generate_excel(d90, clean)
+    data = generate_excel(d90, d180_clean)
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
     assert wb.sheetnames == ["90D Detail", "90D Summary", "180D Detail", "180D Summary"]
 
     det = wb["180D Detail"]
     assert [det.cell(1, c).value for c in range(1, len(DETAIL_HEADERS) + 1)] == DETAIL_HEADERS
-    # only the non-duplicate row remains
+    # only the Z row is in the 180D detail
     assert det.max_row == 2
     assert det.cell(2, 1).value == "Z"
 
@@ -230,3 +191,33 @@ def test_generate_excel_applies_number_formats():
     summ = wb["90D Summary"]
     assert summ.cell(6, 7).number_format == "#,##0"      # Sum of Total Stock
     assert summ.cell(6, 8).number_format == '"$"#,##0'   # Sum of Value
+
+
+# ---------------------------------------------------------------------------
+# Bucketing
+# ---------------------------------------------------------------------------
+def test_compute_cutoff_is_run_date_plus_90():
+    assert compute_cutoff(date(2026, 6, 24)) == date(2026, 9, 22)
+
+
+def test_bucket_for_boundaries():
+    cutoff = date(2026, 9, 22)
+    assert bucket_for(datetime(2026, 9, 22), cutoff) == BUCKET_0_90   # inclusive
+    assert bucket_for(datetime(2026, 9, 21), cutoff) == BUCKET_0_90
+    assert bucket_for(datetime(2026, 9, 23), cutoff) == BUCKET_91_180
+    assert bucket_for(None, cutoff) == BUCKET_NONE
+    assert bucket_for("", cutoff) == BUCKET_NONE
+
+
+def test_assign_buckets_appends_column_and_counts():
+    rows = [
+        _make_row(Material="A", **{"MRP Last Sell Date": datetime(2026, 8, 1)}),   # 0-90
+        _make_row(Material="B", **{"MRP Last Sell Date": datetime(2026, 12, 1)}),  # 91-180
+        _make_row(Material="C", **{"MRP Last Sell Date": None}),                   # none
+    ]
+    detail = load_detail(_make_xlsx(rows))
+    bucketed, counts = assign_buckets(detail, compute_cutoff(date(2026, 6, 24)))
+    assert bucketed.headers[-1] == "Bucket"
+    assert [r[-1] for r in bucketed.rows] == [BUCKET_0_90, BUCKET_91_180, BUCKET_NONE]
+    assert counts == {BUCKET_0_90: 1, BUCKET_91_180: 1, BUCKET_NONE: 1}
+    assert len(bucketed.rows) == 3 and len(bucketed.rows[0]) == len(detail.headers) + 1

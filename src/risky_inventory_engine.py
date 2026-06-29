@@ -39,7 +39,7 @@ from __future__ import annotations
 import copy
 import io
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
@@ -80,28 +80,51 @@ DETAIL_HEADERS = [
     "Batch Comment",
 ]
 
-# Fields that together identify one inventory line. Comparing on these (rather
-# than Material alone) keeps separate batches / inventory lines distinct, so an
-# already-cleaned 180-day file loses nothing while a cumulative one loses
-# exactly its first-90-day rows.
-KEY_COLUMNS = [
-    "Material",
-    "Material Description",
-    "Material Group Desc.",
-    "Description p. group",
-    "Brand Manager Desc",
-    "MRP Area",
-    "Batch",
-    "SLED Offset in days",
-    "Batch Expiry Date",
-    "MRP Last Sell Date",
-    "Quantity",
-    "Qty Val. UoM",
-    "Total Stock",
-    "Moving price",
-    "Value",
-    "Batch Comment",
-]
+MRP_LAST_SELL_COL = "MRP Last Sell Date"
+BUCKET_COL = "Bucket"
+BUCKET_0_90 = "0-90 Day"
+BUCKET_91_180 = "91-180 Day"
+BUCKET_NONE = "No Last Sell Date"
+CUTOFF_DAYS = 90
+
+
+def compute_cutoff(run_date: date) -> date:
+    """The 0–90 / 91–180 dividing date: report run date + 90 days."""
+    return run_date + timedelta(days=CUTOFF_DAYS)
+
+
+def _as_date(value: Any):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
+
+
+def bucket_for(last_sell: Any, cutoff: date) -> str:
+    """Bucket one MRP Last Sell Date value. Blank/non-date -> No Last Sell Date;
+    on/before cutoff -> 0-90 Day; after cutoff -> 91-180 Day."""
+    d = _as_date(last_sell)
+    if d is None:
+        return BUCKET_NONE
+    return BUCKET_0_90 if d <= cutoff else BUCKET_91_180
+
+
+def assign_buckets(detail: "DetailTable", cutoff: date) -> tuple["DetailTable", dict]:
+    """Return a copy of ``detail`` with a Bucket column appended to every row,
+    plus per-bucket counts. Row order is preserved."""
+    li = detail.index[MRP_LAST_SELL_COL]
+    counts = {BUCKET_0_90: 0, BUCKET_91_180: 0, BUCKET_NONE: 0}
+    new_rows = []
+    for row in detail.rows:
+        b = bucket_for(row[li], cutoff)
+        counts[b] += 1
+        new_rows.append(list(row) + [b])
+    bucketed = copy.copy(detail)
+    bucketed.headers = detail.headers + [BUCKET_COL]
+    bucketed.rows = new_rows
+    return bucketed, counts
+
 
 # ---------------------------------------------------------------------------
 # Summary (Sheet2) layout — reproduced exactly from the supplied pivot tables
@@ -230,44 +253,6 @@ def load_detail(file_obj: Any) -> DetailTable:
         header_fills=header_fills,
         header_alignments=header_aligns,
     )
-
-
-# ---------------------------------------------------------------------------
-# De-duplication
-# ---------------------------------------------------------------------------
-def _norm(value: Any) -> str:
-    """Normalise one cell for reliable row comparison (display is untouched)."""
-    if value is None:
-        return ""
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d")
-    if isinstance(value, bool):  # guard: bool is a subclass of int
-        return str(value)
-    if isinstance(value, (int, float)):
-        return format(round(float(value), 6), ".6f")
-    return str(value).strip()
-
-
-def _row_key(row: list[Any], idx: dict[str, int]) -> tuple[str, ...]:
-    return tuple(_norm(row[idx[col]]) for col in KEY_COLUMNS)
-
-
-def remove_duplicate_rows(d90: DetailTable, d180: DetailTable) -> DetailTable:
-    """Return a copy of the 180-day detail with rows already in the 90-day
-    detail removed. Order and formatting of the 180-day file are preserved.
-
-    If the 180-day file was already cleaned, nothing matches and every row is
-    kept unchanged.
-    """
-    idx90 = d90.index
-    key90 = {_row_key(r, idx90) for r in d90.rows}
-
-    idx180 = d180.index
-    kept = [r for r in d180.rows if _row_key(r, idx180) not in key90]
-
-    cleaned = copy.copy(d180)
-    cleaned.rows = kept
-    return cleaned
 
 
 # ---------------------------------------------------------------------------
