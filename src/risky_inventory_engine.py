@@ -124,15 +124,15 @@ def assign_buckets(detail: "DetailTable", cutoff: date) -> tuple["DetailTable", 
 # ---------------------------------------------------------------------------
 @dataclass
 class DetailTable:
-    """The Sheet1 detail rows together with the formatting we read off it."""
+    """The Sheet1 detail rows plus the per-column number formats read off it.
+
+    The output workbook's Detail header look and column widths come from the
+    committed template, so only ``number_formats`` (applied to the data cells)
+    is carried here."""
 
     headers: list[str]
     rows: list[list[Any]]
     number_formats: dict[int, str] = field(default_factory=dict)   # 1-based col -> fmt
-    column_widths: dict[str, float] = field(default_factory=dict)  # letter -> width
-    header_fonts: list[Any] = field(default_factory=list)          # per-column copy
-    header_fills: list[Any] = field(default_factory=list)
-    header_alignments: list[Any] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -186,28 +186,7 @@ def load_detail(file_obj: Any) -> DetailTable:
     for c in range(1, ncols + 1):
         number_formats[c] = ws.cell(fmt_row, c).number_format
 
-    column_widths = {
-        letter: dim.width
-        for letter, dim in ws.column_dimensions.items()
-        if dim.width is not None
-    }
-
-    header_fonts, header_fills, header_aligns = [], [], []
-    for c in range(1, ncols + 1):
-        cell = ws.cell(1, c)
-        header_fonts.append(copy.copy(cell.font))
-        header_fills.append(copy.copy(cell.fill))
-        header_aligns.append(copy.copy(cell.alignment))
-
-    return DetailTable(
-        headers=headers,
-        rows=rows,
-        number_formats=number_formats,
-        column_widths=column_widths,
-        header_fonts=header_fonts,
-        header_fills=header_fills,
-        header_alignments=header_aligns,
-    )
+    return DetailTable(headers=headers, rows=rows, number_formats=number_formats)
 
 
 # ---------------------------------------------------------------------------

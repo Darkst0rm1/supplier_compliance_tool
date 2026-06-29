@@ -205,10 +205,15 @@ def test_template_asset_is_valid_and_data_clean():
     bucket_idx = names.index("Bucket")
     assert bucket_idx in [pf.fld for pf in piv.pageFields]       # Bucket is a page filter
     assert piv.cache.refreshOnLoad is True
-    # No real supplier data committed in the cache definition.
-    cdef = zipfile.ZipFile(TEMPLATE_PATH).read(
-        "xl/pivotCache/pivotCacheDefinition1.xml").decode()
-    assert "10001334" not in cdef
+    # No real supplier data committed: the cached records part is empty and the
+    # base-field shared items are scrubbed (a sample material code is gone). The
+    # only items left are grouped-date labels (month names), not supplier data.
+    zf = zipfile.ZipFile(TEMPLATE_PATH)
+    records = zf.read("xl/pivotCache/pivotCacheRecords1.xml").decode()
+    assert "<r>" not in records and 'count="0"' in records   # no cached data rows
+    cdef = zf.read("xl/pivotCache/pivotCacheDefinition1.xml").decode()
+    assert "10001334" not in cdef                            # material code scrubbed
+    assert "LC WHITE HOMINY" not in cdef and "OPAUG2726" not in cdef
 
 
 # ---------------------------------------------------------------------------
