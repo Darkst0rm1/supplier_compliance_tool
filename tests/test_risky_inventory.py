@@ -6,7 +6,9 @@ depend on the supplied sample files.
 from __future__ import annotations
 
 import io
+import zipfile
 from datetime import date, datetime
+from pathlib import Path
 
 import openpyxl
 import pytest
@@ -18,6 +20,7 @@ from src.risky_inventory_engine import (
     DETAIL_HEADERS,
     GRAND_TOTAL_LABEL,
     SUMMARY_HEADER,
+    TEMPLATE_PATH,
     RiskyInventoryError,
     assign_buckets,
     build_summary,
@@ -221,3 +224,23 @@ def test_assign_buckets_appends_column_and_counts():
     assert [r[-1] for r in bucketed.rows] == [BUCKET_0_90, BUCKET_91_180, BUCKET_NONE]
     assert counts == {BUCKET_0_90: 1, BUCKET_91_180: 1, BUCKET_NONE: 1}
     assert len(bucketed.rows) == 3 and len(bucketed.rows[0]) == len(detail.headers) + 1
+
+
+# ---------------------------------------------------------------------------
+# Template asset structure
+# ---------------------------------------------------------------------------
+def test_template_asset_is_valid_and_data_clean():
+    assert Path(TEMPLATE_PATH).exists()
+    wb = openpyxl.load_workbook(TEMPLATE_PATH)
+    assert set(wb.sheetnames) == {"Detail", "Summary"}
+    hdr = [wb["Detail"].cell(1, c).value for c in range(1, 22)]
+    assert hdr[:20] == DETAIL_HEADERS and hdr[20] == "Bucket"
+    piv = wb["Summary"]._pivots[0]
+    names = [f.name for f in piv.cache.cacheFields]
+    bucket_idx = names.index("Bucket")
+    assert bucket_idx in [pf.fld for pf in piv.pageFields]       # Bucket is a page filter
+    assert piv.cache.refreshOnLoad is True
+    # No real supplier data committed in the cache definition.
+    cdef = zipfile.ZipFile(TEMPLATE_PATH).read(
+        "xl/pivotCache/pivotCacheDefinition1.xml").decode()
+    assert "10001334" not in cdef

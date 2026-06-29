@@ -40,10 +40,13 @@ import copy
 import io
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+
+TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "risky_inventory_template.xlsx"
 
 
 class RiskyInventoryError(Exception):
