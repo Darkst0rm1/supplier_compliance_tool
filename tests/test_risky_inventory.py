@@ -18,12 +18,9 @@ from src.risky_inventory_engine import (
     BUCKET_91_180,
     BUCKET_NONE,
     DETAIL_HEADERS,
-    GRAND_TOTAL_LABEL,
-    SUMMARY_HEADER,
     TEMPLATE_PATH,
     RiskyInventoryError,
     assign_buckets,
-    build_summary,
     bucket_for,
     compute_cutoff,
     generate_excel,
@@ -126,74 +123,42 @@ def test_load_detail_skips_blank_rows():
 
 
 # ---------------------------------------------------------------------------
-# build_summary
+# generate_excel — fills the PivotTable template
 # ---------------------------------------------------------------------------
-def test_summary_structure_grouping_sort_and_grand_total():
+def test_generate_excel_fills_detail_and_keeps_pivot():
     rows = [
-        _make_row(**{"Material Group Desc.": "ALPHA", "Quantity": 5, "Total Stock": 5, "Value": 100}),
-        _make_row(**{"Material Group Desc.": "ALPHA", "Quantity": 5, "Total Stock": 5, "Value": 50}),
-        _make_row(**{"Material Group Desc.": "BETA", "Quantity": 1, "Total Stock": 2, "Value": 300}),
+        _make_row(Material="A", **{"MRP Last Sell Date": datetime(2026, 8, 1)}),
+        _make_row(Material="B", **{"MRP Last Sell Date": datetime(2026, 12, 1)}),
     ]
-    grid = build_summary(load_detail(_make_xlsx(rows)))
+    detail = load_detail(_make_xlsx(rows))
+    bucketed, _ = assign_buckets(detail, compute_cutoff(date(2026, 6, 24)))
+    data = generate_excel(bucketed)
 
-    # Three filter rows, blank, header row
-    assert grid[0][0] == "Description p. group" and grid[0][1] == "(All)"
-    assert grid[3] == [None] * len(SUMMARY_HEADER)
-    assert grid[4] == SUMMARY_HEADER
+    # Pivot parts survive (real, refreshable PivotTable).
+    parts = [n for n in zipfile.ZipFile(io.BytesIO(data)).namelist() if "pivot" in n.lower()]
+    assert len(parts) == 5
 
-    body = grid[5:-1]
-    labels = [r[0] for r in body]
-    assert labels == ["BETA", "ALPHA"]              # sorted by Sum of Value desc
-    beta = body[0]
-    assert (beta[5], beta[6], beta[7]) == (1, 2, 300)
-    alpha = body[1]
-    assert (alpha[5], alpha[6], alpha[7]) == (10, 10, 150)  # summed
-
-    total = grid[-1]
-    assert total[0] == GRAND_TOTAL_LABEL
-    assert (total[5], total[6], total[7]) == (11, 12, 450)
-
-
-def test_summary_value_tie_breaks_by_group_name_ascending():
-    rows = [
-        _make_row(**{"Material Group Desc.": "WESTKEY", "Value": 0, "Quantity": 1, "Total Stock": 1}),
-        _make_row(**{"Material Group Desc.": "CARRS", "Value": 0, "Quantity": 1, "Total Stock": 1}),
-    ]
-    grid = build_summary(load_detail(_make_xlsx(rows)))
-    labels = [r[0] for r in grid[5:-1]]
-    assert labels == ["CARRS", "WESTKEY"]
-
-
-# ---------------------------------------------------------------------------
-# generate_excel
-# ---------------------------------------------------------------------------
-def test_generate_excel_sheet_order_and_detail_preserved():
-    d90 = load_detail(_make_xlsx([_make_row(Material="A")]))
-    d180_clean = load_detail(_make_xlsx([_make_row(Material="Z")]))
-
-    data = generate_excel(d90, d180_clean)
-    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
-    assert wb.sheetnames == ["90D Detail", "90D Summary", "180D Detail", "180D Summary"]
-
-    det = wb["180D Detail"]
-    assert [det.cell(1, c).value for c in range(1, len(DETAIL_HEADERS) + 1)] == DETAIL_HEADERS
-    # only the Z row is in the 180D detail
-    assert det.max_row == 2
-    assert det.cell(2, 1).value == "Z"
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    det = wb["Detail"]
+    assert det.cell(1, 21).value == "Bucket"
+    assert det.max_row == 3                      # header + 2 rows
+    assert det.cell(2, 21).value == "0-90 Day"
+    assert det.cell(3, 21).value == "91-180 Day"
+    piv = wb["Summary"]._pivots[0]
+    assert piv.cache.refreshOnLoad is True
+    assert piv.cache.cacheSource.worksheetSource.ref == "A1:U3"
 
 
 def test_generate_excel_applies_number_formats():
-    d = load_detail(_make_xlsx([_make_row()]))
-    data = generate_excel(d, d)
+    rows = [_make_row(Material="A", **{"MRP Last Sell Date": datetime(2026, 8, 1)})]
+    detail = load_detail(_make_xlsx(rows))
+    bucketed, _ = assign_buckets(detail, compute_cutoff(date(2026, 6, 24)))
+    data = generate_excel(bucketed)
     wb = openpyxl.load_workbook(io.BytesIO(data))
-    det = wb["90D Detail"]
-    # Batch Expiry Date / Quantity / Value column formats
+    det = wb["Detail"]
     assert det.cell(2, DETAIL_HEADERS.index("Batch Expiry Date") + 1).number_format == "mm-dd-yy"
     assert det.cell(2, DETAIL_HEADERS.index("Quantity") + 1).number_format == "#,##0.000"
     assert det.cell(2, DETAIL_HEADERS.index("Value") + 1).number_format == "#,##0.00"
-    summ = wb["90D Summary"]
-    assert summ.cell(6, 7).number_format == "#,##0"      # Sum of Total Stock
-    assert summ.cell(6, 8).number_format == '"$"#,##0'   # Sum of Value
 
 
 # ---------------------------------------------------------------------------

@@ -1,35 +1,24 @@
 """Processing engine for the Risky Inventory page.
 
-Automates the one manual step in the existing Risky Inventory process. The user
-downloads two reports:
+The user downloads one report: the full 0–180 day Risky Inventory export. Each
+row carries an ``MRP Last Sell Date``. This engine splits the rows into buckets
+relative to a report run date (cutoff = run date + 90 days):
 
-1. a 90-day report, and
-2. a cumulative 180-day report (which repeats the same first 90 days).
+* ``0-90 Day``  — Last Sell Date on/before the cutoff,
+* ``91-180 Day`` — Last Sell Date after the cutoff,
+* ``No Last Sell Date`` — blank/missing date.
 
-Normally the user opens the 180-day file and deletes by hand the rows that
-already appear in the 90-day file. This module does only that: it removes from
-the 180-day detail any row that is already present in the 90-day detail. Nothing
-is renamed, recalculated, filtered, or added beyond what the supplied files
-already contain.
+The output is a workbook whose ``Detail`` sheet holds every row with a ``Bucket``
+column appended, and whose ``Summary`` sheet is a real, interactive Excel
+PivotTable filterable by ``Bucket`` (and by Description p. group / Brand Manager
+Desc / MRP Area). openpyxl cannot create a PivotTable, so the workbook is built
+by filling a committed template (``templates/risky_inventory_template.xlsx``,
+derived once from a golden export and scrubbed of supplier data) and pointing the
+pivot cache at the new data with ``refreshOnLoad`` so Excel rebuilds it on open.
 
-The two supplied workbooks are the golden specification:
-
-* ``Risky Inventory June 24 P2 - 90D.xlsx``
-* ``Risky Inventory June 24 P2 - 180D.xlsx``
-
-Each workbook has two sheets:
-
-* ``Sheet1`` — the detailed inventory rows (20 columns, exact SAP export
-  headers). Values are preserved verbatim: text codes stay text, dates stay
-  dates, negatives / zeros / blanks are untouched.
-* ``Sheet2`` — an Excel PivotTable summarising ``Sheet1``: one row per
-  ``Material Group Desc.`` with Sum of Quantity / Sum of Total Stock / Sum of
-  Value, sorted by Sum of Value descending, ending in a ``Grand Total`` row.
-  Three report filters (``Description p. group``, ``Brand Manager Desc``,
-  ``MRP Area``) sit above the table, all set to ``(All)``.
-
-The summary is rebuilt from the (processed) detail rather than copied from the
-pivot cache, so the cleaned 180-day summary reflects only the rows that remain.
+Source detail values are preserved verbatim: text codes stay text, dates stay
+dates, negatives / zeros / blanks are untouched. The uploaded ``Sheet1`` must
+match ``DETAIL_HEADERS`` exactly.
 
 This module is intentionally self-contained — like every other engine in this
 app it stands alone and does not import the other report logic.
@@ -43,10 +32,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "risky_inventory_template.xlsx"
+TEMPLATE_DETAIL_SHEET = "Detail"
+TEMPLATE_SUMMARY_SHEET = "Summary"
 
 
 class RiskyInventoryError(Exception):
@@ -54,10 +45,9 @@ class RiskyInventoryError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Source layout (exact sheet names and headers)
+# Source layout (exact sheet name and headers)
 # ---------------------------------------------------------------------------
 DETAIL_SHEET = "Sheet1"
-SUMMARY_SHEET = "Sheet2"
 
 # The full 20-column detail header, in order. The uploaded files must match.
 DETAIL_HEADERS = [
@@ -96,7 +86,7 @@ def compute_cutoff(run_date: date) -> date:
     return run_date + timedelta(days=CUTOFF_DAYS)
 
 
-def _as_date(value: Any):
+def _as_date(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
@@ -113,7 +103,7 @@ def bucket_for(last_sell: Any, cutoff: date) -> str:
     return BUCKET_0_90 if d <= cutoff else BUCKET_91_180
 
 
-def assign_buckets(detail: "DetailTable", cutoff: date) -> tuple["DetailTable", dict]:
+def assign_buckets(detail: "DetailTable", cutoff: date) -> tuple["DetailTable", dict[str, int]]:
     """Return a copy of ``detail`` with a Bucket column appended to every row,
     plus per-bucket counts. Row order is preserved."""
     li = detail.index[MRP_LAST_SELL_COL]
@@ -127,44 +117,6 @@ def assign_buckets(detail: "DetailTable", cutoff: date) -> tuple["DetailTable", 
     bucketed.headers = detail.headers + [BUCKET_COL]
     bucketed.rows = new_rows
     return bucketed, counts
-
-
-# ---------------------------------------------------------------------------
-# Summary (Sheet2) layout — reproduced exactly from the supplied pivot tables
-# ---------------------------------------------------------------------------
-SUMMARY_FILTERS = [
-    ("Description p. group", "(All)"),
-    ("Brand Manager Desc", "(All)"),
-    ("MRP Area", "(All)"),
-]
-SUMMARY_GROUP_COL = "Material Group Desc."
-SUMMARY_HEADER = [
-    "Material Group Desc.",
-    "Material",
-    "Material Description",
-    "Batch",
-    "Batch Expiry Date",
-    "Sum of Quantity",
-    "Sum of Total Stock",
-    "Sum of Value",
-]
-GRAND_TOTAL_LABEL = "Grand Total"
-# (detail column -> 0-based position in SUMMARY_HEADER) for the three value cols.
-_SUMMARY_VALUE_COLS = [
-    ("Quantity", 5),
-    ("Total Stock", 6),
-    ("Value", 7),
-]
-# Number formats and column widths copied from the supplied Sheet2 pivots.
-SUMMARY_COL_WIDTHS = {
-    "A": 52.71, "B": 15.71, "C": 18.43, "D": 13.43,
-    "E": 19.71, "F": 15.71, "G": 18.43, "H": 13.43,
-}
-SUMMARY_NUMBER_FORMATS = {  # 1-based column index -> format
-    6: "General",       # Sum of Quantity
-    7: "#,##0",         # Sum of Total Stock
-    8: '"$"#,##0',      # Sum of Value
-}
 
 
 # ---------------------------------------------------------------------------
@@ -259,126 +211,31 @@ def load_detail(file_obj: Any) -> DetailTable:
 
 
 # ---------------------------------------------------------------------------
-# Summary (rebuilt from the processed detail, not the pivot cache)
+# Workbook output — fill the committed PivotTable template
 # ---------------------------------------------------------------------------
-def _num(value: Any) -> float:
-    if isinstance(value, bool) or value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    return 0.0
+def generate_excel(bucketed: DetailTable) -> bytes:
+    """Fill the committed PivotTable template with the bucketed detail and return
+    the workbook bytes. The Summary pivot is repointed at the new data and set to
+    refresh on open, so Excel rebuilds it from the Detail sheet."""
+    wb = load_workbook(TEMPLATE_PATH)
+    ws = wb[TEMPLATE_DETAIL_SHEET]
+    if ws.max_row > 1:
+        ws.delete_rows(2, ws.max_row - 1)
 
-
-def build_summary(detail: DetailTable) -> list[list[Any]]:
-    """Build the Sheet2-style summary grid from a detail table.
-
-    Returns the full sheet grid (filter rows, blank row, header, one row per
-    ``Material Group Desc.`` sorted by Sum of Value descending, then a Grand
-    Total row) — each row already the width of ``SUMMARY_HEADER``.
-    """
-    idx = detail.index
-    g_i = idx[SUMMARY_GROUP_COL]
-    val_src = {detail_col: idx[detail_col] for detail_col, _ in _SUMMARY_VALUE_COLS}
-
-    totals: dict[str, list[float]] = {}
-    for row in detail.rows:
-        group = row[g_i]
-        bucket = totals.setdefault(group, [0.0, 0.0, 0.0])
-        bucket[0] += _num(row[val_src["Quantity"]])
-        bucket[1] += _num(row[val_src["Total Stock"]])
-        bucket[2] += _num(row[val_src["Value"]])
-
-    # Sort by Sum of Value descending; ties broken by group name ascending
-    # (matches the supplied pivots, e.g. CARRS before WESTKEY at value 0).
-    ordered = sorted(totals.items(), key=lambda kv: (-kv[1][2], str(kv[0])))
-
-    width = len(SUMMARY_HEADER)
-
-    def _blank_row() -> list[Any]:
-        return [None] * width
-
-    grid: list[list[Any]] = []
-    for label, value in SUMMARY_FILTERS:
-        r = _blank_row()
-        r[0], r[1] = label, value
-        grid.append(r)
-    grid.append(_blank_row())          # blank separator row
-    grid.append(list(SUMMARY_HEADER))  # column header row
-
-    grand = [0.0, 0.0, 0.0]
-    for group, (q, ts, v) in ordered:
-        r = _blank_row()
-        r[0] = group
-        r[5], r[6], r[7] = q, ts, v
-        grid.append(r)
-        grand[0] += q
-        grand[1] += ts
-        grand[2] += v
-
-    total_row = _blank_row()
-    total_row[0] = GRAND_TOTAL_LABEL
-    total_row[5], total_row[6], total_row[7] = grand
-    grid.append(total_row)
-
-    return grid
-
-
-# ---------------------------------------------------------------------------
-# Workbook output
-# ---------------------------------------------------------------------------
-def _to_excel_value(value: Any) -> Any:
-    """openpyxl accepts datetime, str, int, float and None directly."""
-    return value
-
-
-def _write_detail_sheet(ws, detail: DetailTable) -> None:
-    headers = detail.headers
-    for c, name in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c, value=name)
-        if c - 1 < len(detail.header_fonts):
-            cell.font = detail.header_fonts[c - 1]
-            cell.fill = detail.header_fills[c - 1]
-            cell.alignment = detail.header_alignments[c - 1]
-
-    for r_off, row in enumerate(detail.rows):
+    for r_off, row in enumerate(bucketed.rows):
         r = r_off + 2
         for c, value in enumerate(row, 1):
-            cell = ws.cell(row=r, column=c, value=_to_excel_value(value))
-            fmt = detail.number_formats.get(c)
-            if fmt:
-                cell.number_format = fmt
-
-    for letter, width in detail.column_widths.items():
-        ws.column_dimensions[letter].width = width
-
-
-def _write_summary_sheet(ws, grid: list[list[Any]]) -> None:
-    for r_off, row in enumerate(grid):
-        r = r_off + 1
-        for c, value in enumerate(row, 1):
-            if value is None:
-                continue
             cell = ws.cell(row=r, column=c, value=value)
-            fmt = SUMMARY_NUMBER_FORMATS.get(c)
+            fmt = bucketed.number_formats.get(c)
             if fmt:
                 cell.number_format = fmt
-    for letter, width in SUMMARY_COL_WIDTHS.items():
-        ws.column_dimensions[letter].width = width
 
-
-def generate_excel(d90: DetailTable, d180_clean: DetailTable) -> bytes:
-    """Render the four-sheet Risky Inventory workbook (bytes).
-
-    Sheets, in order: ``90D Detail``, ``90D Summary``, ``180D Detail``,
-    ``180D Summary``. The 180-day sheets use the cleaned detail.
-    """
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    _write_detail_sheet(wb.create_sheet("90D Detail"), d90)
-    _write_summary_sheet(wb.create_sheet("90D Summary"), build_summary(d90))
-    _write_detail_sheet(wb.create_sheet("180D Detail"), d180_clean)
-    _write_summary_sheet(wb.create_sheet("180D Summary"), build_summary(d180_clean))
+    n = len(bucketed.rows)
+    last_col = get_column_letter(len(bucketed.headers))   # 'U'
+    piv = wb[TEMPLATE_SUMMARY_SHEET]._pivots[0]
+    piv.cache.cacheSource.worksheetSource.ref = f"A1:{last_col}{n + 1}"
+    piv.cache.recordCount = n
+    piv.cache.refreshOnLoad = True
 
     buf = io.BytesIO()
     wb.save(buf)
