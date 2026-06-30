@@ -40,9 +40,10 @@ import copy
 import io
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 
@@ -338,59 +339,71 @@ def build_summary(detail: DetailTable) -> list[list[Any]]:
 # ---------------------------------------------------------------------------
 # Workbook output
 # ---------------------------------------------------------------------------
-def _to_excel_value(value: Any) -> Any:
-    """openpyxl accepts datetime, str, int, float and None directly."""
-    return value
+# The four-sheet workbook is produced from a committed template that already
+# carries two genuine Excel PivotTables (one per Summary sheet, each wired to its
+# Detail sheet) reproducing the golden layout. We only rewrite the detail rows
+# and re-point each pivot cache; ``refreshOnLoad`` makes Excel rebuild the pivot
+# from the new data the moment the file is opened. This keeps the report a real
+# PivotTable while staying pure-openpyxl (no Excel/COM at runtime, so it runs on
+# Streamlit Cloud). The pivot cells read blank until first opened in Excel.
+TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "risky_inventory_template.xlsx"
+
+# Template detail sheet name -> the pivot-bearing summary sheet that reads it.
+_DETAIL_TO_SUMMARY = {
+    "90D Detail": "90D Summary",
+    "180D Detail": "180D Summary",
+}
 
 
-def _write_detail_sheet(ws, detail: DetailTable) -> None:
-    headers = detail.headers
-    for c, name in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=c, value=name)
-        if c - 1 < len(detail.header_fonts):
-            cell.font = detail.header_fonts[c - 1]
-            cell.fill = detail.header_fills[c - 1]
-            cell.alignment = detail.header_alignments[c - 1]
+def _fill_detail_sheet(ws, detail: DetailTable) -> None:
+    """Replace a template detail sheet's data with ``detail`` (headers kept).
+
+    Existing golden sample rows are deleted first so the sheet ends exactly at
+    the new data; header row styling and column widths from the template are
+    preserved. Per-column number formats captured from the uploaded file are
+    reapplied so dates/quantities/values display as in the source export.
+    """
+    ncols = len(detail.headers)
+    for c, name in enumerate(detail.headers, 1):
+        ws.cell(row=1, column=c).value = name
+
+    if ws.max_row > 1:
+        ws.delete_rows(2, ws.max_row - 1)
 
     for r_off, row in enumerate(detail.rows):
         r = r_off + 2
         for c, value in enumerate(row, 1):
-            cell = ws.cell(row=r, column=c, value=_to_excel_value(value))
+            cell = ws.cell(row=r, column=c, value=value)
             fmt = detail.number_formats.get(c)
             if fmt:
                 cell.number_format = fmt
 
-    for letter, width in detail.column_widths.items():
-        ws.column_dimensions[letter].width = width
 
-
-def _write_summary_sheet(ws, grid: list[list[Any]]) -> None:
-    for r_off, row in enumerate(grid):
-        r = r_off + 1
-        for c, value in enumerate(row, 1):
-            if value is None:
-                continue
-            cell = ws.cell(row=r, column=c, value=value)
-            fmt = SUMMARY_NUMBER_FORMATS.get(c)
-            if fmt:
-                cell.number_format = fmt
-    for letter, width in SUMMARY_COL_WIDTHS.items():
-        ws.column_dimensions[letter].width = width
+def _repoint_pivot(ws_summary, n_rows: int, ncols: int) -> None:
+    """Aim the summary sheet's pivot cache at the freshly written detail extent
+    (``A1:<last col><n_rows+1>``) and flag it to refresh when Excel opens it."""
+    if not getattr(ws_summary, "_pivots", None):
+        return
+    last_col = get_column_letter(ncols)
+    piv = ws_summary._pivots[0]
+    piv.cache.cacheSource.worksheetSource.ref = f"A1:{last_col}{n_rows + 1}"
+    piv.cache.refreshOnLoad = True
 
 
 def generate_excel(d90: DetailTable, d180_clean: DetailTable) -> bytes:
     """Render the four-sheet Risky Inventory workbook (bytes).
 
     Sheets, in order: ``90D Detail``, ``90D Summary``, ``180D Detail``,
-    ``180D Summary``. The 180-day sheets use the cleaned detail.
+    ``180D Summary``. Each Summary sheet is a real PivotTable (from the template)
+    that refreshes off its Detail sheet when the file is opened in Excel. The
+    180-day sheets use the cleaned detail.
     """
-    wb = Workbook()
-    wb.remove(wb.active)
+    wb = load_workbook(TEMPLATE_PATH)
 
-    _write_detail_sheet(wb.create_sheet("90D Detail"), d90)
-    _write_summary_sheet(wb.create_sheet("90D Summary"), build_summary(d90))
-    _write_detail_sheet(wb.create_sheet("180D Detail"), d180_clean)
-    _write_summary_sheet(wb.create_sheet("180D Summary"), build_summary(d180_clean))
+    for detail_sheet, detail in (("90D Detail", d90), ("180D Detail", d180_clean)):
+        ws = wb[detail_sheet]
+        _fill_detail_sheet(ws, detail)
+        _repoint_pivot(wb[_DETAIL_TO_SUMMARY[detail_sheet]], len(detail), len(detail.headers))
 
     buf = io.BytesIO()
     wb.save(buf)
