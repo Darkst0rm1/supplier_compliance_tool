@@ -133,6 +133,18 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
         )
         st.dataframe(chase, use_container_width=True, hide_index=True)
 
+    stale = sheets["Exempt But Submitting"]
+    st.subheader("Exempt But Submitting")
+    if stale.empty:
+        st.caption("No exempt supplier uploaded anything this month.")
+    else:
+        st.caption(
+            f"**{len(stale)}** exempt supplier(s) uploaded files anyway. They are "
+            "excused from uploading but are doing it regardless — their exemption "
+            "may no longer be needed. Worth re-reviewing on the tracker."
+        )
+        st.dataframe(stale, use_container_width=True, hide_index=True)
+
     with st.spinner("Writing Excel workbook..."):
         xlsx_bytes = generate_workbook(sheets)
 

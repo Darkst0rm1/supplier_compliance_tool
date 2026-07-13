@@ -480,7 +480,76 @@ class TestShouldHaveUploaded:
         assert top["Vendor Name"] == "ACQUA MINERALE SAN BENEDETTO"
         assert top["Inbound POs Expected"] == 2
         assert top["Portal Uploads"] == 0
-        assert top["Bill-Back Total"] == 400  # 2 POs x $200
+
+    def test_no_billback_column(self, scenario):
+        """The chase-list is a chase-list, not an invoice. The BB- tabs are the
+        billing artefact; duplicating a dollar figure here invites the two
+        drifting apart."""
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        assert "Bill-Back Total" not in sheets["Should Have Uploaded"].columns
+
+
+class TestExemptButSubmitting:
+    """Exempt suppliers who upload anyway — their exemption is probably stale."""
+
+    def test_lists_an_exempt_supplier_that_uploaded(self):
+        sap = pd.DataFrame([
+            _sap_row("4001", "70001111", "BOTHWELL CHEESE"),
+            _sap_row("4002", "70001111", "BOTHWELL CHEESE"),
+        ])
+        portal = pd.DataFrame([_portal_row("4001", "BOTHWELL CHEESE")])
+        exceptions = {normalize_supplier_name("BOTHWELL CHEESE"): _rec("BOTHWELL CHEESE")}
+
+        sheet = build_report(sap, portal, 2026, 6, exceptions=exceptions)[
+            "Exempt But Submitting"
+        ]
+        assert list(sheet["Vendor Name"]) == ["BOTHWELL CHEESE"]
+        row = sheet.iloc[0]
+        assert row["Inbound POs"] == 2
+        assert row["Portal Files Uploaded"] == 1
+        assert row["Of Which Rejected"] == 0
+        assert row["POs Still Missing A File"] == 1
+
+    def test_a_silent_exempt_supplier_is_excluded(self):
+        """Uploading nothing is what an exemption is FOR — not a signal."""
+        sap = pd.DataFrame([_sap_row("4003", "70001111", "BOTHWELL CHEESE")])
+        exceptions = {normalize_supplier_name("BOTHWELL CHEESE"): _rec("BOTHWELL CHEESE")}
+        portal = pd.DataFrame(columns=list(_portal_row("x", "y")))
+
+        sheet = build_report(sap, portal, 2026, 6, exceptions=exceptions)[
+            "Exempt But Submitting"
+        ]
+        assert sheet.empty
+
+    def test_a_non_exempt_supplier_is_excluded(self, scenario):
+        """GOOD SUPPLIER uploads, but it was never exempt — not this sheet's business."""
+        sap, portal, exceptions, tracker = scenario
+        sheet = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )["Exempt But Submitting"]
+        assert "GOOD SUPPLIER" not in set(sheet["Vendor Name"])
+
+    def test_a_rejected_upload_still_counts_as_submitting(self):
+        """An Invalid upload means they engaged with the process — that's the signal."""
+        sap = pd.DataFrame([_sap_row("4004", "70001111", "BOTHWELL CHEESE")])
+        portal = pd.DataFrame([_portal_row("4004", "BOTHWELL CHEESE", status="Invalid")])
+        exceptions = {normalize_supplier_name("BOTHWELL CHEESE"): _rec("BOTHWELL CHEESE")}
+
+        sheet = build_report(sap, portal, 2026, 6, exceptions=exceptions)[
+            "Exempt But Submitting"
+        ]
+        assert len(sheet) == 1
+        assert sheet.iloc[0]["Of Which Rejected"] == 1
+
+    def test_empty_sap_does_not_crash(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap.iloc[0:0], portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        assert sheets["Exempt But Submitting"].empty
 
     def test_a_supplier_with_an_invalid_upload_is_excluded(self):
         """An Invalid upload still means the supplier knows the process exists.

@@ -325,6 +325,7 @@ def build_report(
         "Processing POs Review": _review_columns(processing),
         "Supplier Summary": _supplier_summary(sap_unique),
         "Should Have Uploaded": _should_have_uploaded(sap_unique),
+        "Exempt But Submitting": _exempt_but_submitting(sap_unique),
         "Warehouse Summary": _warehouse_summary(sap_unique),
     }
     sheets.update(_billback_sheets(missing))
@@ -591,7 +592,7 @@ def _should_have_uploaded(sap_unique: pd.DataFrame) -> pd.DataFrame:
     """
     columns = [
         "Vendor Number", "Vendor Name", "Exception Status",
-        "Inbound POs Expected", "Portal Uploads", "Bill-Back Total",
+        "Inbound POs Expected", "Portal Uploads",
     ]
     if sap_unique.empty:
         return pd.DataFrame(columns=columns)
@@ -622,7 +623,6 @@ def _should_have_uploaded(sap_unique: pd.DataFrame) -> pd.DataFrame:
             "Exception Status": status,
             "Inbound POs Expected": expected,
             "Portal Uploads": 0,
-            "Bill-Back Total": expected * BILLBACK_FEE_PER_OCCURRENCE,
         })
 
     if not rows:
@@ -630,6 +630,67 @@ def _should_have_uploaded(sap_unique: pd.DataFrame) -> pd.DataFrame:
     return (
         pd.DataFrame(rows)
         .sort_values("Inbound POs Expected", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def _exempt_but_submitting(sap_unique: pd.DataFrame) -> pd.DataFrame:
+    """Exception suppliers who are uploading anyway -- a stale-exemption signal.
+
+    A supplier excused from uploading who nonetheless submits files has, in
+    practice, solved whatever problem earned them the exemption. The exemption is
+    probably out of date and worth re-reviewing. (Agropur is the live example: it
+    was exempted over bad batch numbers, the tracker's own "Constantly Compliant"
+    sheet lists it, and it now uploads Approved files.)
+
+    Counts an Invalid (rejected) upload as submitting -- the supplier engaged with
+    the process, which is the signal we care about here.
+    """
+    columns = [
+        "Vendor Number", "Vendor Name", "Inbound POs", "Portal Files Uploaded",
+        "Of Which Rejected", "POs Still Missing A File", "Action",
+    ]
+    if sap_unique.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for (vendor_num, vendor_name), g in sap_unique.groupby(
+        ["Vendor Number", "Vendor Name"], dropna=False
+    ):
+        if g["Exception Status"].iloc[0] != EXCEPTION_STATUS_EXCEPTION:
+            continue
+
+        uploaded = int(
+            g[g["Portal Match"] | g["Portal Invalid Match"]][
+                "Normalized PO Number"
+            ].nunique()
+        )
+        if not uploaded:
+            continue
+
+        rejected = int(
+            g[g["Portal Invalid Match"]]["Normalized PO Number"].nunique()
+        )
+        inbound = int(g[g["Has Inbound"]]["Normalized PO Number"].nunique())
+        missing = int(
+            g[g["Has Inbound"] & ~g["Portal Match"]]["Normalized PO Number"].nunique()
+        )
+
+        rows.append({
+            "Vendor Number": vendor_num,
+            "Vendor Name": vendor_name,
+            "Inbound POs": inbound,
+            "Portal Files Uploaded": uploaded,
+            "Of Which Rejected": rejected,
+            "POs Still Missing A File": missing,
+            "Action": "Exempt but submitting — review whether the exemption is still needed.",
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Portal Files Uploaded", ascending=False, kind="stable")
         .reset_index(drop=True)
     )
 
