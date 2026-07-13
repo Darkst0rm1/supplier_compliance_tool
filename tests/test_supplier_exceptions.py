@@ -422,3 +422,13 @@ class TestShouldHaveUploaded:
         sap = pd.DataFrame([_sap_row("3001", "70004444", "NOT SHIPPED YET", inbound="")])
         sheets = build_report(sap, pd.DataFrame(columns=list(_portal_row("x", "y"))), 2026, 6)
         assert "NOT SHIPPED YET" not in set(sheets["Should Have Uploaded"]["Vendor Name"])
+
+
+from streamlit.testing.v1 import AppTest
+
+
+class TestDashboardBoots:
+    def test_page_1_still_renders(self):
+        """The exceptions panel must not crash the page when no DB is configured."""
+        at = AppTest.from_file("app.py", default_timeout=30).run()
+        assert not at.exception
