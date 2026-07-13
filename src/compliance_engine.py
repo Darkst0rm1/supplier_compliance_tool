@@ -65,6 +65,22 @@ def _apply_rows(df: pd.DataFrame, func) -> pd.Series:
     return df.apply(func, axis=1)
 
 
+def _apply_series(series: pd.Series, func, dtype=object) -> pd.Series:
+    """Element-wise `.apply` that is safe on an empty Series.
+
+    pandas 3.0 returns an empty Series holding the *input's* dtype from
+    `series.apply(func)` when there are no rows, rather than inferring the
+    function's return type. That silently produces the wrong dtype downstream
+    -- e.g. an empty "Inbound Delivery" column's `.apply(has_value)` comes back
+    as string/object dtype instead of bool, and `bool_series & other_bool_series`
+    then raises. Pass the expected return dtype so an empty input still yields
+    a genuine typed (e.g. boolean) Series.
+    """
+    if series.empty:
+        return pd.Series([], index=series.index, dtype=dtype)
+    return series.apply(func)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -113,7 +129,9 @@ def build_report(
     sap_valid = sap[sap["Normalized PO Number"] != ""].copy()
     portal_valid_rows = portal[portal["Normalized PO Number"] != ""].copy()
 
-    sap_valid["Has Inbound"] = sap_valid["Inbound Delivery"].apply(has_value)
+    sap_valid["Has Inbound"] = _apply_series(
+        sap_valid["Inbound Delivery"], has_value, dtype=bool
+    )
 
     # Exception Status is annotated per SAP row (not just in the summary rollup)
     # so a future change can act on it without re-plumbing the engine.
@@ -306,6 +324,7 @@ def build_report(
         "Closed POs Review": _review_columns(closed),
         "Processing POs Review": _review_columns(processing),
         "Supplier Summary": _supplier_summary(sap_unique),
+        "Should Have Uploaded": _should_have_uploaded(sap_unique),
         "Warehouse Summary": _warehouse_summary(sap_unique),
     }
     sheets.update(_billback_sheets(missing))
@@ -559,6 +578,62 @@ def _review_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Group rollups
 # ---------------------------------------------------------------------------
+def _should_have_uploaded(sap_unique: pd.DataFrame) -> pd.DataFrame:
+    """Suppliers who uploaded NOTHING despite being expected to.
+
+    Stricter, and more damning, than "missing some": a supplier who uploaded 9 of
+    10 POs has a working process with a gap; one who uploaded 0 of 10 does not
+    know the process exists. Partial cases are already covered by the bill-back
+    tabs, so this sheet earns its place only by isolating total failures.
+
+    An Invalid (rejected) upload counts as "they tried" and keeps a supplier OFF
+    this sheet.
+    """
+    columns = [
+        "Vendor Number", "Vendor Name", "Exception Status",
+        "Inbound POs Expected", "Portal Uploads", "Bill-Back Total",
+    ]
+    if sap_unique.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows = []
+    for (vendor_num, vendor_name), g in sap_unique.groupby(
+        ["Vendor Number", "Vendor Name"], dropna=False
+    ):
+        status = g["Exception Status"].iloc[0]
+        if status == EXCEPTION_STATUS_EXCEPTION:
+            continue
+
+        uploads = int(
+            g[g["Portal Match"] | g["Portal Invalid Match"]][
+                "Normalized PO Number"
+            ].nunique()
+        )
+        if uploads:
+            continue
+
+        expected = int(g[g["Has Inbound"]]["Normalized PO Number"].nunique())
+        if not expected:
+            continue
+
+        rows.append({
+            "Vendor Number": vendor_num,
+            "Vendor Name": vendor_name,
+            "Exception Status": status,
+            "Inbound POs Expected": expected,
+            "Portal Uploads": 0,
+            "Bill-Back Total": expected * BILLBACK_FEE_PER_OCCURRENCE,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Inbound POs Expected", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
 def _supplier_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (vendor_num, vendor_name), g in sap_unique.groupby(

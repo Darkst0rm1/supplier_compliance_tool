@@ -380,3 +380,45 @@ class TestEmptyFrames:
         )
         assert sheets["Supplier Summary"].empty
         assert sheets["Should Have Uploaded"].empty
+
+
+class TestShouldHaveUploaded:
+    def test_lists_only_non_exception_zero_upload_suppliers(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        names = set(sheets["Should Have Uploaded"]["Vendor Name"])
+
+        assert "ACQUA MINERALE SAN BENEDETTO" in names  # expected, uploaded nothing
+        assert "AMERICOLD TACOMA" in names              # not on tracker, still chased
+        assert "BOTHWELL CHEESE" not in names           # an exception
+        assert "GOOD SUPPLIER" not in names             # it uploaded
+
+    def test_sorted_by_most_pos_first(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        counts = sheets["Should Have Uploaded"]["Inbound POs Expected"].tolist()
+        assert counts == sorted(counts, reverse=True)
+        # Acqua has 2 POs, Americold 1.
+        top = sheets["Should Have Uploaded"].iloc[0]
+        assert top["Vendor Name"] == "ACQUA MINERALE SAN BENEDETTO"
+        assert top["Inbound POs Expected"] == 2
+        assert top["Portal Uploads"] == 0
+        assert top["Bill-Back Total"] == 400  # 2 POs x $200
+
+    def test_a_supplier_with_an_invalid_upload_is_excluded(self):
+        """An Invalid upload still means the supplier knows the process exists.
+        They belong in bill-back, not on the 'never even tried' list."""
+        sap = pd.DataFrame([_sap_row("2001", "70003333", "TRIED AND FAILED")])
+        portal = pd.DataFrame([_portal_row("2001", "TRIED AND FAILED", status="Invalid")])
+        sheets = build_report(sap, portal, 2026, 6)
+        assert "TRIED AND FAILED" not in set(sheets["Should Have Uploaded"]["Vendor Name"])
+
+    def test_a_supplier_with_no_inbound_delivery_is_excluded(self):
+        """No inbound delivery means there was nothing to document yet."""
+        sap = pd.DataFrame([_sap_row("3001", "70004444", "NOT SHIPPED YET", inbound="")])
+        sheets = build_report(sap, pd.DataFrame(columns=list(_portal_row("x", "y"))), 2026, 6)
+        assert "NOT SHIPPED YET" not in set(sheets["Should Have Uploaded"]["Vendor Name"])
