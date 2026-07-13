@@ -117,3 +117,135 @@ class TestReadTrackerExceptions:
         pd.DataFrame({"a": [1]}).to_excel(path, sheet_name="Nope", index=False)
         with pytest.raises(TrackerImportError, match="Tracker"):
             read_tracker_exceptions(path)
+
+
+from src.config import (
+    EXCEPTION_STATUS_EXCEPTION,
+    EXCEPTION_STATUS_EXPECTED,
+    EXCEPTION_STATUS_NOT_ON_TRACKER,
+)
+from src.supplier_exceptions import (
+    ExceptionRecord,
+    ExceptionValidationError,
+    classify_supplier,
+    validate_supplier_name,
+)
+
+
+def _rec(name, reason="Unable to Comply", vendor_number=None):
+    return ExceptionRecord(
+        id=1,
+        supplier_name=name,
+        normalized_name=normalize_supplier_name(name),
+        vendor_number=vendor_number,
+        reason=reason,
+        added_by=None,
+        added_at=None,
+    )
+
+
+class TestClassifySupplier:
+    def setup_method(self):
+        self.exceptions = {
+            normalize_supplier_name("BOTHWELL CHEESE"): _rec("BOTHWELL CHEESE"),
+            normalize_supplier_name("CAFFE MAURO SPA"): _rec(
+                "CAFFE MAURO SPA", vendor_number="70006979"
+            ),
+        }
+        self.tracker = {
+            normalize_supplier_name("BOTHWELL CHEESE"),
+            normalize_supplier_name("CAFFE MAURO SPA"),
+            normalize_supplier_name("ACQUA MINERALE SAN BENEDETTO"),
+        }
+
+    def test_exception_supplier(self):
+        assert classify_supplier(
+            "Bothwell Cheese", "70001111", self.exceptions, self.tracker
+        ) == EXCEPTION_STATUS_EXCEPTION
+
+    def test_vendor_number_matches_even_when_the_name_differs(self):
+        # SAP spells it differently, but we recorded the vendor number.
+        assert classify_supplier(
+            "CAFFE MAURO S.P.A. (ITALY)", "70006979", self.exceptions, self.tracker
+        ) == EXCEPTION_STATUS_EXCEPTION
+
+    def test_on_tracker_but_not_an_exception(self):
+        assert classify_supplier(
+            "ACQUA MINERALE SAN BENEDETTO", "70007212", self.exceptions, self.tracker
+        ) == EXCEPTION_STATUS_EXPECTED
+
+    def test_absent_from_the_tracker(self):
+        # A 3PL warehouse, not a supplier at all.
+        assert classify_supplier(
+            "AMERICOLD TACOMA", "70009999", self.exceptions, self.tracker
+        ) == EXCEPTION_STATUS_NOT_ON_TRACKER
+
+    def test_empty_tracker_collapses_to_expected(self):
+        assert classify_supplier(
+            "ANYONE", "70009999", self.exceptions, set()
+        ) == EXCEPTION_STATUS_EXPECTED
+
+    def test_blank_vendor_name(self):
+        assert classify_supplier("", "", self.exceptions, self.tracker) == (
+            EXCEPTION_STATUS_NOT_ON_TRACKER
+        )
+
+
+class TestValidateSupplierName:
+    def test_rejects_blank(self):
+        with pytest.raises(ExceptionValidationError):
+            validate_supplier_name("   ")
+
+    def test_trims(self):
+        assert validate_supplier_name("  Acme  ") == "Acme"
+
+
+import os
+
+from src.config import REASON_MANUAL
+from src.supplier_exceptions import (
+    DuplicateExceptionError,
+    ExceptionNotFoundError,
+    ExceptionStore,
+)
+
+_TEST_DSN = os.environ.get("TEST_DATABASE_URL")
+requires_db = pytest.mark.skipif(not _TEST_DSN, reason="TEST_DATABASE_URL not set")
+
+
+@requires_db
+class TestExceptionStore:
+    def setup_method(self):
+        self.store = ExceptionStore(_TEST_DSN)
+        self.store.ensure_schema()
+        self.name = "PYTEST TEMP SUPPLIER"
+        try:
+            self.store.remove_exception(normalize_supplier_name(self.name))
+        except ExceptionNotFoundError:
+            pass
+
+    def teardown_method(self):
+        try:
+            self.store.remove_exception(normalize_supplier_name(self.name))
+        except ExceptionNotFoundError:
+            pass
+
+    def test_add_load_remove_roundtrip(self):
+        rec = self.store.add_exception(self.name, REASON_MANUAL)
+        assert rec.normalized_name == normalize_supplier_name(self.name)
+
+        loaded = self.store.load_exceptions()
+        assert rec.normalized_name in loaded
+        assert loaded[rec.normalized_name].reason == REASON_MANUAL
+
+        self.store.remove_exception(rec.normalized_name)
+        assert rec.normalized_name not in self.store.load_exceptions()
+
+    def test_duplicate_rejected(self):
+        self.store.add_exception(self.name, REASON_MANUAL)
+        with pytest.raises(DuplicateExceptionError):
+            self.store.add_exception(self.name.lower(), REASON_MANUAL)
+
+    def test_remove_missing_raises(self):
+        with pytest.raises(ExceptionNotFoundError):
+            self.store.remove_exception("NO SUCH SUPPLIER AT ALL")
