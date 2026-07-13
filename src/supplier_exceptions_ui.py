@@ -46,7 +46,10 @@ def load_exceptions_or_empty() -> tuple[dict[str, ExceptionRecord], set[str], st
         store.ensure_schema()
         return store.load_exceptions(), set(), None
     except Exception as exc:  # noqa: BLE001 - never break the report over this
-        return {}, set(), f"Could not load supplier exceptions: {exc}"
+        return {}, set(), (
+            f"Could not load supplier exceptions ({type(exc).__name__}). "
+            "The report is otherwise complete."
+        )
 
 
 def render_exception_manager() -> None:
@@ -65,7 +68,10 @@ def render_exception_manager() -> None:
             store.ensure_schema()
             records = store.load_exceptions()
         except Exception as exc:  # noqa: BLE001
-            st.warning(f"Could not reach the exceptions database: {exc}")
+            st.warning(
+                f"Could not reach the exceptions database ({type(exc).__name__}). "
+                "The exceptions list is unavailable, but the report is otherwise complete."
+            )
             return
 
         st.caption(
@@ -100,6 +106,11 @@ def render_exception_manager() -> None:
                     st.rerun()
                 except (DuplicateExceptionError, ExceptionValidationError) as exc:
                     st.error(str(exc))
+                except Exception as exc:  # noqa: BLE001 - fail open, e.g. a dropped connection
+                    st.warning(
+                        f"Could not add the exception ({type(exc).__name__}). "
+                        "The exceptions database is unavailable; try again shortly."
+                    )
 
         if records:
             to_remove = st.selectbox(
@@ -114,3 +125,8 @@ def render_exception_manager() -> None:
                     st.rerun()
                 except ExceptionNotFoundError as exc:
                     st.error(str(exc))
+                except Exception as exc:  # noqa: BLE001 - fail open, e.g. a dropped connection
+                    st.warning(
+                        f"Could not remove the exception ({type(exc).__name__}). "
+                        "The exceptions database is unavailable; try again shortly."
+                    )

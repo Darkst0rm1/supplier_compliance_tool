@@ -432,3 +432,41 @@ class TestDashboardBoots:
         """The exceptions panel must not crash the page when no DB is configured."""
         at = AppTest.from_file("app.py", default_timeout=30).run()
         assert not at.exception
+
+
+from src import supplier_exceptions_ui
+
+
+class TestLoadExceptionsFailsOpen:
+    """A dropped Neon connection must never surface the DSN/host, and must
+    never break the report -- load_exceptions_or_empty() always returns."""
+
+    def test_fails_open_and_does_not_leak_the_host(self, monkeypatch):
+        fake_host = "secret-host.neon.tech"
+
+        class FakeOperationalError(Exception):
+            def __str__(self):
+                return f"failed to resolve host '{fake_host}': timeout"
+
+        monkeypatch.setattr(
+            supplier_exceptions_ui, "_dsn", lambda: "postgresql://user:pw@" + fake_host + "/db"
+        )
+
+        def _raise_ensure_schema(self):
+            raise FakeOperationalError()
+
+        monkeypatch.setattr(
+            supplier_exceptions_ui.ExceptionStore, "ensure_schema", _raise_ensure_schema
+        )
+
+        records, tracker_names, message = supplier_exceptions_ui.load_exceptions_or_empty()
+
+        # Fails open: report generation can proceed with an empty exceptions set.
+        assert records == {}
+        assert tracker_names == set()
+
+        # Never leaks the host (or any part of the DSN) into the message.
+        assert message is not None
+        assert fake_host not in message
+        assert "user:pw" not in message
+        assert "FakeOperationalError" in message
