@@ -23,6 +23,8 @@ from .config import (
     BILLBACK_FEE_PER_OCCURRENCE,
     BILLBACK_REASON,
     COMPLIANT,
+    EXCEPTION_STATUS_EXCEPTION,
+    EXCEPTION_STATUS_EXPECTED,
     MONTH_NAMES,
     PO_STATUS_CLOSED,
     PO_STATUS_PROCESSING_CODES,
@@ -32,6 +34,7 @@ from .config import (
     SAP_FILTER_DATE_COLUMNS,
 )
 from .normalizer import has_value
+from .supplier_exceptions import ExceptionRecord, classify_supplier
 
 
 def _map_lookup(keys: pd.Series, lookup: pd.Series) -> pd.Series:
@@ -70,8 +73,21 @@ def build_report(
     portal_df: pd.DataFrame,
     report_year: int,
     report_month: int,
+    exceptions: dict[str, "ExceptionRecord"] | None = None,
+    tracker_names: set[str] | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Return a dict {sheet_name: dataframe} for every required sheet."""
+    """Return a dict {sheet_name: dataframe} for every required sheet.
+
+    `exceptions` maps normalized supplier name -> ExceptionRecord; `tracker_names`
+    is every supplier the tracker knows about. Both default to empty, in which
+    case every supplier is labelled "Expected to upload" and the report is
+    identical to one built before this feature existed.
+
+    Exceptions are INFORMATIONAL. They deliberately do not affect bill-back or
+    the compliance percentage.
+    """
+    exceptions = exceptions or {}
+    tracker_names = tracker_names or set()
     label = f"{MONTH_NAMES[report_month - 1]} {report_year}"
 
     sap = sap_df.copy()
@@ -98,6 +114,15 @@ def build_report(
     portal_valid_rows = portal[portal["Normalized PO Number"] != ""].copy()
 
     sap_valid["Has Inbound"] = sap_valid["Inbound Delivery"].apply(has_value)
+
+    # Exception Status is annotated per SAP row (not just in the summary rollup)
+    # so a future change can act on it without re-plumbing the engine.
+    sap_valid["Exception Status"] = [
+        classify_supplier(name, number, exceptions, tracker_names)
+        for name, number in zip(
+            sap_valid["Vendor Name"], sap_valid["Vendor Number"], strict=True
+        )
+    ]
 
     # --- Split portal entries by File Status ---------------------------------
     portal_valid_rows["__status"] = (
@@ -551,10 +576,16 @@ def _supplier_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
         processing_n = g[g["PO Status"].isin(PO_STATUS_PROCESSING_CODES)][
             "Normalized PO Number"
         ].nunique()
+        status = (
+            g["Exception Status"].iloc[0]
+            if "Exception Status" in g.columns and len(g)
+            else EXCEPTION_STATUS_EXPECTED
+        )
         pct = (found / with_inbound) if with_inbound else 0.0
         rows.append({
             "Vendor Number": vendor_num,
             "Vendor Name": vendor_name,
+            "Exception Status": status,
             "Total SAP POs": total,
             "SAP POs With Inbound Delivery": with_inbound,
             "Portal Files Found": found,

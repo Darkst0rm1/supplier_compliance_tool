@@ -249,3 +249,134 @@ class TestExceptionStore:
     def test_remove_missing_raises(self):
         with pytest.raises(ExceptionNotFoundError):
             self.store.remove_exception("NO SUCH SUPPLIER AT ALL")
+
+
+from src.compliance_engine import build_report
+
+
+def _sap_row(po, vendor_num, vendor_name, inbound="IBD-1"):
+    return {
+        "PO Number": po,
+        "Normalized PO Number": po,
+        "Vendor Number": vendor_num,
+        "Vendor Name": vendor_name,
+        "Warehouse": "WH1",
+        "PO Status": "A",
+        "Appointment Date": pd.Timestamp("2026-06-15"),
+        "Delivery Date": pd.Timestamp("2026-06-15"),
+        "Confirmed PU Date": pd.NaT,
+        "Est PU Date": pd.NaT,
+        "Inbound Delivery": inbound,
+        "Inbound Delivery Status": "A",
+    }
+
+
+def _portal_row(po, supplier, status="Approved"):
+    return {
+        "PO Number": po,
+        "Normalized PO Number": po,
+        "Supplier Name": supplier,
+        "Upload Date": pd.Timestamp("2026-06-16"),
+        "File Status": status,
+        "File Name": "doc.pdf",
+        "Uploaded By": "someone",
+        "Invalid Comment": "",
+        "Downloaded By": "",
+        "Download Date": pd.NaT,
+    }
+
+
+@pytest.fixture
+def scenario():
+    """Three suppliers:
+      BOTHWELL CHEESE  -- an exception, uploaded nothing
+      ACQUA MINERALE   -- on the tracker, uploaded nothing  <- should be chased
+      AMERICOLD TACOMA -- not on the tracker, uploaded nothing
+      GOOD SUPPLIER    -- on the tracker, uploaded its file
+    """
+    sap = pd.DataFrame([
+        _sap_row("1001", "70001111", "BOTHWELL CHEESE"),
+        _sap_row("1002", "70007212", "ACQUA MINERALE SAN BENEDETTO"),
+        _sap_row("1003", "70007212", "ACQUA MINERALE SAN BENEDETTO"),
+        _sap_row("1004", "70009999", "AMERICOLD TACOMA"),
+        _sap_row("1005", "70002222", "GOOD SUPPLIER"),
+    ])
+    portal = pd.DataFrame([_portal_row("1005", "GOOD SUPPLIER")])
+    exceptions = {
+        normalize_supplier_name("BOTHWELL CHEESE"): _rec("BOTHWELL CHEESE"),
+    }
+    tracker = {
+        normalize_supplier_name("BOTHWELL CHEESE"),
+        normalize_supplier_name("ACQUA MINERALE SAN BENEDETTO"),
+        normalize_supplier_name("GOOD SUPPLIER"),
+    }
+    return sap, portal, exceptions, tracker
+
+
+class TestSupplierSummaryExceptionColumn:
+    def test_column_present_with_the_three_states(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        summary = sheets["Supplier Summary"].set_index("Vendor Name")
+
+        assert "Exception Status" in sheets["Supplier Summary"].columns
+        assert summary.loc["BOTHWELL CHEESE", "Exception Status"] == (
+            EXCEPTION_STATUS_EXCEPTION
+        )
+        assert summary.loc["ACQUA MINERALE SAN BENEDETTO", "Exception Status"] == (
+            EXCEPTION_STATUS_EXPECTED
+        )
+        assert summary.loc["AMERICOLD TACOMA", "Exception Status"] == (
+            EXCEPTION_STATUS_NOT_ON_TRACKER
+        )
+
+    def test_without_exceptions_column_still_exists(self, scenario):
+        # No DB / no exceptions passed: the column reads "Expected to upload"
+        # for everyone rather than vanishing, so the sheet's shape is stable.
+        sap, portal, _, _ = scenario
+        sheets = build_report(sap, portal, 2026, 6)
+        col = sheets["Supplier Summary"]["Exception Status"]
+        assert set(col) == {EXCEPTION_STATUS_EXPECTED}
+
+
+class TestBillbackAndComplianceUnchanged:
+    """The load-bearing guarantee: exceptions are INFORMATIONAL ONLY."""
+
+    def test_billback_identical_with_and_without_exceptions(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        without = build_report(sap, portal, 2026, 6)
+        with_exc = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+
+        bb_without = {k: v for k, v in without.items() if k.startswith("BB-")}
+        bb_with = {k: v for k, v in with_exc.items() if k.startswith("BB-")}
+
+        assert set(bb_without) == set(bb_with)
+        # Bothwell is an exception but is STILL billed -- by design, for now.
+        assert any("BOTHWELL" in k.upper() for k in bb_with)
+        for name in bb_without:
+            pd.testing.assert_frame_equal(bb_without[name], bb_with[name])
+
+    def test_compliance_percentage_identical(self, scenario):
+        sap, portal, exceptions, tracker = scenario
+        without = build_report(sap, portal, 2026, 6)
+        with_exc = build_report(
+            sap, portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        pd.testing.assert_frame_equal(
+            without["Monthly Summary"], with_exc["Monthly Summary"]
+        )
+
+
+class TestEmptyFrames:
+    def test_no_sap_rows_does_not_crash(self, scenario):
+        """pandas 3.0: empty .map/.apply blow up. Guard the exceptions path too."""
+        sap, portal, exceptions, tracker = scenario
+        sheets = build_report(
+            sap.iloc[0:0], portal, 2026, 6, exceptions=exceptions, tracker_names=tracker
+        )
+        assert sheets["Supplier Summary"].empty
+        assert sheets["Should Have Uploaded"].empty
