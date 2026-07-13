@@ -125,3 +125,31 @@ MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
+
+# --- Supplier exceptions ---------------------------------------------------
+# Suppliers with an approved exception are not required to upload inbound
+# documentation. The list is sourced from the Master Inbound Delivery Compliance
+# Tracker workbook, as the union of two lists:
+#   1. Tracker sheet, Compliance Status == TRACKER_STATUS_UNABLE_TO_COMPLY (24)
+#   2. "POs received" sheet, a column literally containing "EXEMPT" (3)
+# The two overlap on 2 suppliers, so the union is 25.
+TRACKER_SHEET = "Tracker"
+TRACKER_STATUS_COLUMN = "Compliance Status"
+TRACKER_NAME_COLUMN = "Supplier Names "  # NB: trailing space, as in the workbook
+
+# NB: DOUBLE space after the dash. This is the literal value in the workbook --
+# do not "correct" it. The Summary sheet words it differently ("NO - Unable to
+# comply - Approved exceptions"); that sheet is not the source of truth.
+TRACKER_STATUS_UNABLE_TO_COMPLY = "NO -  Unable to Comply"
+
+TRACKER_EXEMPT_SHEET = "POs received"
+TRACKER_EXEMPT_MARKER = "EXEMPT"
+
+REASON_UNABLE_TO_COMPLY = "Unable to Comply"
+REASON_EXEMPT_MARK = "EXEMPT mark"
+REASON_MANUAL = "Manual"
+
+# Exception Status values shown on the Supplier Summary sheet.
+EXCEPTION_STATUS_EXCEPTION = "Exception"
+EXCEPTION_STATUS_EXPECTED = "Expected to upload"
+EXCEPTION_STATUS_NOT_ON_TRACKER = "Not on tracker"

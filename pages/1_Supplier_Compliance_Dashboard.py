@@ -10,6 +10,7 @@ from src.config import EXCLUDED_PO_PREFIXES, MONTH_NAMES, SAP_FILTER_DATE_COLUMN
 from src.portal_importer import PortalImportError, load_portal
 from src.report_generator import generate_workbook
 from src.sap_importer import SapImportError, describe_missing_optionals, load_sap
+from src.supplier_exceptions_ui import load_exceptions_or_empty, render_exception_manager
 
 
 st.title("Supplier Documentation Compliance Report")
@@ -85,8 +86,15 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
             "not subject to portal documentation)."
         )
 
+    exceptions, tracker_names, exceptions_error = load_exceptions_or_empty()
+    if exceptions_error:
+        st.info(exceptions_error)
+
     with st.spinner("Applying compliance rules..."):
-        sheets = build_report(sap_df, portal_df, sel_year, sel_month)
+        sheets = build_report(
+            sap_df, portal_df, sel_year, sel_month,
+            exceptions=exceptions, tracker_names=tracker_names,
+        )
 
     st.success("Report generated.")
 
@@ -114,6 +122,29 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
     else:
         st.caption("No bill-back: every inbound PO had its document uploaded.")
 
+    chase = sheets["Should Have Uploaded"]
+    st.subheader("Should Have Uploaded — Nothing Received")
+    if chase.empty:
+        st.caption("Every supplier expected to upload submitted at least one file.")
+    else:
+        st.caption(
+            f"**{len(chase)}** supplier(s) uploaded **nothing at all** this month "
+            "despite having inbound deliveries, and are not on the exceptions list."
+        )
+        st.dataframe(chase, use_container_width=True, hide_index=True)
+
+    stale = sheets["Exempt But Submitting"]
+    st.subheader("Exempt But Submitting")
+    if stale.empty:
+        st.caption("No exempt supplier uploaded anything this month.")
+    else:
+        st.caption(
+            f"**{len(stale)}** exempt supplier(s) uploaded files anyway. They are "
+            "excused from uploading but are doing it regardless — their exemption "
+            "may no longer be needed. Worth re-reviewing on the tracker."
+        )
+        st.dataframe(stale, use_container_width=True, hide_index=True)
+
     with st.spinner("Writing Excel workbook..."):
         xlsx_bytes = generate_workbook(sheets)
 
@@ -124,3 +155,5 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
         file_name=file_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+render_exception_manager()

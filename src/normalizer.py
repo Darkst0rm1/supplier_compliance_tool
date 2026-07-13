@@ -11,6 +11,7 @@ Rules (from spec):
 from __future__ import annotations
 
 import re
+import unicodedata
 import pandas as pd
 
 # Anything that could plausibly separate POs in a free-text portal cell.
@@ -85,3 +86,35 @@ def has_value(value) -> bool:
         return False
     s = str(value).strip()
     return bool(s) and s.lower() != "nan"
+
+
+# Characters that differ freely between the tracker's spelling of a supplier and
+# SAP's. Mapped to a space (not removed) so "D&D" -> "D D", never "DD".
+# Includes the Unicode punctuation that Excel/Word autocorrect commonly
+# substitutes for their ASCII equivalents: curly quotes and en/em dashes.
+_SUPPLIER_PUNCT = ".,'-()&/’‘“”–—"
+
+
+def normalize_supplier_name(value) -> str:
+    """Normalize a supplier/vendor name into a join key. Empty/NaN -> ''.
+
+    The tracker identifies suppliers only by name -- its `Supplier #` column
+    (G61, 491) has zero overlap with SAP's 8-digit Vendor Number -- so this is
+    the only key available. Folds accented characters to their ASCII base
+    (the supplier set is heavily Italian/European), uppercases, maps
+    punctuation to spaces, collapses whitespace.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return ""
+    # Fold diacritics to ASCII (e.g. CAFFÈ -> CAFFE) before the punctuation pass.
+    s = "".join(
+        ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch)
+    )
+    for ch in _SUPPLIER_PUNCT:
+        s = s.replace(ch, " ")
+    return _WHITESPACE_RE.sub(" ", s).strip().upper()
