@@ -55,3 +55,65 @@ class TestNormalizeSupplierName:
     def test_em_dash_becomes_space(self):
         assert normalize_supplier_name("Acme—Foods") == "ACME FOODS"
         assert normalize_supplier_name("Acme–Foods") == "ACME FOODS"
+
+
+import pandas as pd
+
+from src.config import REASON_EXEMPT_MARK, REASON_UNABLE_TO_COMPLY
+from src.tracker_importer import TrackerImportError, read_tracker_exceptions
+
+
+def _fake_tracker(tmp_path):
+    """A miniature stand-in for the real tracker workbook."""
+    path = tmp_path / "tracker.xlsx"
+    tracker = pd.DataFrame({
+        "Supplier Names ": [
+            "ACETUM S.P.A.",
+            "BOTHWELL CHEESE",
+            "DARE (LESLEY STOWE FINE FOODS)",
+            "COMPLIANT CO",
+        ],
+        "Compliance Status": [
+            "NO -  Unable to Comply",   # double space, as in the real workbook
+            "NO -  Unable to Comply",
+            "NO -  Unable to Comply",
+            "YES - Submitted on Portal",
+        ],
+    })
+    # "POs received": name in col 0, the EXEMPT marker in col 3.
+    pos_received = pd.DataFrame({
+        "Non compliant": ["BOTHWELL CHEESE", "LUNDBERG FAMILY FARMS", "OTHER CO"],
+        "Pos received": [15, 12, 3],
+        "Column1": ["x", "x", "x"],
+        "Unnamed: 3": ["EXEMPT", "EXEMPT", None],
+    })
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        tracker.to_excel(w, sheet_name="Tracker", index=False)
+        pos_received.to_excel(w, sheet_name="POs received", index=False)
+    return path
+
+
+class TestReadTrackerExceptions:
+    def test_unions_both_lists_and_dedupes(self, tmp_path):
+        rows = read_tracker_exceptions(_fake_tracker(tmp_path))
+        names = {n for n, _ in rows}
+        # 3 Unable-to-Comply + 2 EXEMPT-marked, overlapping on Bothwell -> 4.
+        assert names == {
+            "ACETUM S.P.A.",
+            "BOTHWELL CHEESE",
+            "DARE (LESLEY STOWE FINE FOODS)",
+            "LUNDBERG FAMILY FARMS",
+        }
+        assert "COMPLIANT CO" not in names
+        assert "OTHER CO" not in names
+
+    def test_unable_to_comply_wins_the_reason_on_overlap(self, tmp_path):
+        rows = dict(read_tracker_exceptions(_fake_tracker(tmp_path)))
+        assert rows["BOTHWELL CHEESE"] == REASON_UNABLE_TO_COMPLY
+        assert rows["LUNDBERG FAMILY FARMS"] == REASON_EXEMPT_MARK
+
+    def test_missing_sheet_raises_friendly_error(self, tmp_path):
+        path = tmp_path / "wrong.xlsx"
+        pd.DataFrame({"a": [1]}).to_excel(path, sheet_name="Nope", index=False)
+        with pytest.raises(TrackerImportError, match="Tracker"):
+            read_tracker_exceptions(path)
