@@ -105,6 +105,45 @@ supplier_compliance_tool/
 
 ---
 
+## Supplier Exceptions
+
+Some suppliers are formally approved as **not required** to upload inbound
+documentation. The **Supplier Summary** sheet flags these with an
+**Exception Status** column: `Exception`, `Expected to upload`, or
+`Not on tracker`.
+
+A new **"Should Have Uploaded"** sheet + dashboard section is the chase-list:
+suppliers with inbound deliveries this month, no uploads at all, and no
+exception on file.
+
+**Where the exception list comes from:** the Master Inbound Delivery
+Compliance Tracker workbook, hand-maintained outside this tool. It's the
+union of two sheets — `Tracker` rows with Compliance Status
+`"NO -  Unable to Comply"`, and `POs received` rows hand-marked `EXEMPT` —
+25 suppliers total after de-duplication. The tracker only names suppliers,
+so matching against SAP vendor numbers is done by normalized name.
+
+**Storage:** the list lives in a Neon Postgres table, `supplier_exceptions`.
+`scripts/seed_supplier_exceptions.py` seeds/re-syncs it from the tracker
+workbook and is idempotent (safe to re-run). **Once seeded, the database is
+the source of truth** — editing the Excel workbook afterward has no effect
+on the app. Day-to-day additions/removals happen in the "Manage Supplier
+Exceptions" expander on the dashboard page.
+
+**Informational only:** Exception Status does **not** change bill-back or
+the compliance percentage — an exception supplier is still billed like any
+other non-compliant supplier. This was an explicit business decision,
+verified against real June data (bill-back unchanged at 59 suppliers /
+$18,800).
+
+**Configuration:** requires the `[postgres] dsn` secret, set in both
+Streamlit Cloud (Settings → Secrets) and the local, git-ignored
+`.streamlit/secrets.toml`. Without it the app still runs normally — it
+shows an info banner and every supplier reads "Expected to upload" — it
+never crashes.
+
+---
+
 ## Future work (not in V1)
 
 - Fine calculation
