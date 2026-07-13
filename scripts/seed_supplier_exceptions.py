@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.supplier_exceptions import (  # noqa: E402
     DuplicateExceptionError,
     ExceptionStore,
+    ExceptionValidationError,
 )
 from src.tracker_importer import read_tracker_exceptions  # noqa: E402
 
@@ -62,7 +63,7 @@ def main() -> None:
     store = ExceptionStore(_dsn())
     store.ensure_schema()
 
-    added = skipped = 0
+    added = skipped = invalid = 0
     for name, reason in sorted(rows):
         try:
             store.add_exception(name, reason)
@@ -71,8 +72,11 @@ def main() -> None:
         except DuplicateExceptionError:
             print(f"  exists:  {name}")
             skipped += 1
+        except ExceptionValidationError as exc:
+            print(f"  skipped: {name} ({exc})")
+            invalid += 1
 
-    print(f"\nDone. {added} added, {skipped} already present.")
+    print(f"\nDone. {added} added, {skipped} already present, {invalid} skipped (invalid).")
     print(f"Table now holds {len(store.load_exceptions())} exception(s).")
 
 

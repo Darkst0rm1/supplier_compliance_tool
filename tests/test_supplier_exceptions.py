@@ -118,6 +118,23 @@ class TestReadTrackerExceptions:
         with pytest.raises(TrackerImportError, match="Tracker"):
             read_tracker_exceptions(path)
 
+    def test_works_from_an_in_memory_buffer_not_just_a_path(self, tmp_path):
+        # Regression: _unable_to_comply and _exempt_marked both read the same
+        # object. A Streamlit UploadedFile (unlike a path) is exhausted by the
+        # first pd.read_excel call unless each read seeks back to 0 first --
+        # without that, the EXEMPT-marked rows would silently vanish.
+        import io
+
+        buffer = io.BytesIO(_fake_tracker(tmp_path).read_bytes())
+        rows = read_tracker_exceptions(buffer)
+        names = {n for n, _ in rows}
+        assert names == {
+            "ACETUM S.P.A.",
+            "BOTHWELL CHEESE",
+            "DARE (LESLEY STOWE FINE FOODS)",
+            "LUNDBERG FAMILY FARMS",
+        }
+
 
 from src.config import (
     EXCEPTION_STATUS_EXCEPTION,
@@ -211,6 +228,62 @@ from src.supplier_exceptions import (
 
 _TEST_DSN = os.environ.get("TEST_DATABASE_URL")
 requires_db = pytest.mark.skipif(not _TEST_DSN, reason="TEST_DATABASE_URL not set")
+
+
+class _FakeConn:
+    """Stand-in for a psycopg connection: supports `with conn:` and
+    `conn.execute(...).fetchall()`, returning canned rows."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, *args, **kwargs):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+class TestLoadExceptionsSelfHeals:
+    """Finding 1: load_exceptions() must not trust the stored normalized_name
+    column -- it must recompute the key from supplier_name so classify_supplier
+    (which always recomputes) still matches even if the normalizer changed
+    after the row was written."""
+
+    def test_stale_normalized_name_column_is_ignored(self, monkeypatch):
+        stale_row = {
+            "id": 1,
+            "supplier_name": "Caffè Mauro",
+            # Deliberately wrong/stale relative to the current normalizer --
+            # as if this row was written before diacritic folding existed.
+            "normalized_name": "CAFF MAURO OLD STALE VALUE",
+            "vendor_number": None,
+            "reason": REASON_MANUAL,
+            "added_by": None,
+            "added_at": None,
+        }
+        store = ExceptionStore("postgresql://unused/dsn")
+        monkeypatch.setattr(store, "_connect", lambda: _FakeConn([stale_row]))
+
+        loaded = store.load_exceptions()
+
+        correct_key = normalize_supplier_name("Caffè Mauro")
+        assert correct_key in loaded
+        assert "CAFF MAURO OLD STALE VALUE" not in loaded
+        # The record itself is internally consistent too.
+        assert loaded[correct_key].normalized_name == correct_key
+
+        # And classify_supplier -- which recomputes the key independently --
+        # actually matches against it.
+        assert classify_supplier("Caffe Mauro", None, loaded, set()) == (
+            EXCEPTION_STATUS_EXCEPTION
+        )
 
 
 @requires_db

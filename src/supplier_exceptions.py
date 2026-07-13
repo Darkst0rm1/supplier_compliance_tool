@@ -18,10 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-import psycopg
-from psycopg.errors import UniqueViolation
-from psycopg.rows import dict_row
-
 from .config import (
     EXCEPTION_STATUS_EXCEPTION,
     EXCEPTION_STATUS_EXPECTED,
@@ -142,10 +138,18 @@ _COLS = "id, supplier_name, normalized_name, vendor_number, reason, added_by, ad
 
 
 def _row_to_record(row: dict) -> ExceptionRecord:
+    """Build a record, recomputing normalized_name from the display name.
+
+    The stored `normalized_name` column can go stale if `normalize_supplier_name`
+    changes after the row was written (it already has once, for diacritics). The
+    column is still the DB's unique index and is used to target `remove_exception`,
+    but it must never be trusted as the match key -- `classify_supplier` always
+    recomputes it from `supplier_name`, so the record must agree.
+    """
     return ExceptionRecord(
         id=row["id"],
         supplier_name=row["supplier_name"],
-        normalized_name=row["normalized_name"],
+        normalized_name=normalize_supplier_name(row["supplier_name"]),
         vendor_number=row.get("vendor_number"),
         reason=row["reason"],
         added_by=row.get("added_by"),
@@ -160,6 +164,13 @@ class ExceptionStore:
         self.dsn = dsn
 
     def _connect(self):
+        # Imported lazily so that importing this module for its pure functions
+        # (classify_supplier, ExceptionRecord, validators) never requires
+        # psycopg -- compliance_engine imports this module and must never break
+        # at import time on a psycopg install/binary problem.
+        import psycopg
+        from psycopg.rows import dict_row
+
         return psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
 
     def ensure_schema(self) -> None:
@@ -168,12 +179,18 @@ class ExceptionStore:
                 conn.execute(stmt)
 
     def load_exceptions(self) -> dict[str, ExceptionRecord]:
-        """All exceptions, keyed by normalized_name."""
+        """All exceptions, keyed by normalize_supplier_name(supplier_name).
+
+        Recomputed rather than trusted from the stored `normalized_name` column,
+        so the dict always matches what `classify_supplier` looks up -- even if
+        the normalizer changed after a row was written.
+        """
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {_COLS} FROM supplier_exceptions ORDER BY supplier_name"
             ).fetchall()
-        return {r["normalized_name"]: _row_to_record(r) for r in rows}
+        records = [_row_to_record(r) for r in rows]
+        return {rec.normalized_name: rec for rec in records}
 
     def add_exception(
         self,
@@ -189,6 +206,8 @@ class ExceptionStore:
             raise ExceptionValidationError(
                 f"'{supplier_name}' normalizes to an empty key"
             )
+        from psycopg.errors import UniqueViolation
+
         try:
             with self._connect() as conn:
                 row = conn.execute(

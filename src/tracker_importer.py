@@ -39,7 +39,20 @@ def _find_column(df: pd.DataFrame, wanted: str) -> str | None:
     return None
 
 
+def _seek_start(path_or_buffer) -> None:
+    """Rewind a file-like object (e.g. a Streamlit UploadedFile) before reading.
+
+    A plain path has no `seek`, so this is a no-op for it. A buffer is read
+    twice by this module (once per sheet); without rewinding, the second read
+    would see EOF and silently return nothing.
+    """
+    seek = getattr(path_or_buffer, "seek", None)
+    if callable(seek):
+        seek(0)
+
+
 def _unable_to_comply(path_or_buffer) -> list[str]:
+    _seek_start(path_or_buffer)
     try:
         df = pd.read_excel(path_or_buffer, sheet_name=TRACKER_SHEET)
     except ValueError as exc:
@@ -67,6 +80,7 @@ def _exempt_marked(path_or_buffer) -> list[str]:
     The marker sits in an unnamed column with no stable header, so scan every
     column of the row rather than relying on a position.
     """
+    _seek_start(path_or_buffer)
     try:
         df = pd.read_excel(path_or_buffer, sheet_name=TRACKER_EXEMPT_SHEET)
     except ValueError:
