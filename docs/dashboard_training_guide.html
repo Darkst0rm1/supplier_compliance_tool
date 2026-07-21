@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  img{max-width:100%}
+</style>
+<title>TOL Dashboards — Training Guide</title>
+<style>
+  :root {
+    --paper: #f6f4ee;
+    --paper-2: #efece2;
+    --card: #fffefb;
+    --ink: #20261f;
+    --ink-soft: #55604e;
+    --ink-faint: #7c8574;
+    --line: #ded9c9;
+    --accent: #1f5c3f;
+    --accent-soft: #2f7a54;
+    --accent-wash: #e7efe7;
+    --upload: #b5651d;   /* files you upload */
+    --action: #1f5c3f;   /* action steps */
+    --output: #3b5b8c;   /* what you get */
+    --warn-bg: #fbf3e2;
+    --warn-line: #e6c98a;
+    --warn-ink: #8a6410;
+    --shadow: 0 1px 2px rgba(32,38,31,.05), 0 6px 24px -12px rgba(32,38,31,.18);
+    --radius: 12px;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14180f;
+      --paper-2: #1a1f14;
+      --card: #1e241a;
+      --ink: #e9ecdf;
+      --ink-soft: #b0b8a4;
+      --ink-faint: #838c76;
+      --line: #313826;
+      --accent: #6fbf8e;
+      --accent-soft: #86cfa1;
+      --accent-wash: #22301f;
+      --upload: #d99a5b;
+      --action: #6fbf8e;
+      --output: #8fb0dc;
+      --warn-bg: #2b2413;
+      --warn-line: #5c4a1f;
+      --warn-ink: #dcbb72;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 30px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #f6f4ee; --paper-2: #efece2; --card: #fffefb; --ink: #20261f;
+    --ink-soft: #55604e; --ink-faint: #7c8574; --line: #ded9c9; --accent: #1f5c3f;
+    --accent-soft: #2f7a54; --accent-wash: #e7efe7; --upload: #b5651d; --action: #1f5c3f;
+    --output: #3b5b8c; --warn-bg: #fbf3e2; --warn-line: #e6c98a; --warn-ink: #8a6410;
+    --shadow: 0 1px 2px rgba(32,38,31,.05), 0 6px 24px -12px rgba(32,38,31,.18);
+  }
+  :root[data-theme="dark"] {
+    --paper: #14180f; --paper-2: #1a1f14; --card: #1e241a; --ink: #e9ecdf;
+    --ink-soft: #b0b8a4; --ink-faint: #838c76; --line: #313826; --accent: #6fbf8e;
+    --accent-soft: #86cfa1; --accent-wash: #22301f; --upload: #d99a5b; --action: #6fbf8e;
+    --output: #8fb0dc; --warn-bg: #2b2413; --warn-line: #5c4a1f; --warn-ink: #dcbb72;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 30px -14px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); line-height: 1.6;
+    font-size: 16px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { display: grid; grid-template-columns: 264px minmax(0,1fr); gap: 0;
+          max-width: 1240px; margin: 0 auto; }
+
+  /* ---- Sidebar index ---- */
+  nav.rail {
+    position: sticky; top: 0; align-self: start; height: 100vh;
+    padding: 40px 24px 40px 32px; border-right: 1px solid var(--line);
+    overflow-y: auto;
+  }
+  .rail .mark {
+    font-family: var(--serif); font-weight: 600; font-size: 20px;
+    letter-spacing: .01em; margin: 0 0 4px; line-height: 1.15; color: var(--ink);
+  }
+  .rail .mark span { color: var(--accent); }
+  .rail .sub { font-size: 12.5px; color: var(--ink-faint); margin-bottom: 26px;
+               text-transform: uppercase; letter-spacing: .09em; }
+  .rail ol { list-style: none; margin: 0; padding: 0; counter-reset: nav; }
+  .rail li { margin: 0; }
+  .rail a {
+    display: flex; gap: 11px; align-items: baseline;
+    padding: 7px 10px; margin: 1px 0; border-radius: 8px;
+    color: var(--ink-soft); text-decoration: none; font-size: 14px; line-height: 1.35;
+    transition: background .15s, color .15s;
+  }
+  .rail a:hover { background: var(--accent-wash); color: var(--ink); }
+  .rail a .n {
+    font-family: var(--mono); font-size: 12px; color: var(--accent-soft);
+    font-weight: 600; min-width: 15px; text-align: right; padding-top: 1px;
+  }
+  .rail .toplink { font-size: 13px; color: var(--ink-faint); padding: 6px 10px; }
+  .rail .toplink:hover { color: var(--accent); background: transparent; }
+  .rail hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+
+  /* ---- Main ---- */
+  main { padding: 56px 52px 96px; min-width: 0; }
+  .hero { border-bottom: 1px solid var(--line); padding-bottom: 30px; margin-bottom: 36px; }
+  .eyebrow { font-size: 12.5px; text-transform: uppercase; letter-spacing: .13em;
+             color: var(--accent); font-weight: 600; margin: 0 0 14px; }
+  h1 { font-family: var(--serif); font-weight: 600; font-size: 42px; line-height: 1.08;
+       margin: 0 0 16px; letter-spacing: -.01em; text-wrap: balance; }
+  .lede { font-size: 18px; color: var(--ink-soft); max-width: 62ch; margin: 0; }
+
+  h2.section { font-family: var(--serif); font-size: 15px; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--ink-faint); font-weight: 600;
+    margin: 44px 0 18px; }
+
+  /* basics list */
+  .basics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr));
+            gap: 14px; margin: 0 0 8px; }
+  .basic { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+           padding: 16px 18px; box-shadow: var(--shadow); }
+  .basic h3 { margin: 0 0 6px; font-size: 14.5px; font-family: var(--sans); font-weight: 650;
+              display: flex; align-items: center; gap: 8px; }
+  .basic p { margin: 0; font-size: 13.5px; color: var(--ink-soft); }
+  .basic .ico { width: 22px; height: 22px; flex: none; color: var(--accent); }
+
+  /* quick reference table */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius);
+               box-shadow: var(--shadow); background: var(--card); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 620px; }
+  thead th { text-align: left; font-weight: 650; color: var(--ink-soft);
+    background: var(--paper-2); padding: 12px 16px; border-bottom: 1px solid var(--line);
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
+  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: var(--accent-wash); }
+  td .num { font-family: var(--mono); color: var(--accent-soft); font-weight: 600; }
+  td .dash { font-weight: 600; }
+  td.files code { display: inline; }
+
+  /* cards */
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    box-shadow: var(--shadow); padding: 30px 32px; margin-bottom: 22px;
+    scroll-margin-top: 24px;
+  }
+  .card > header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 6px; }
+  .badge {
+    font-family: var(--mono); font-weight: 600; font-size: 15px; color: var(--card);
+    background: var(--accent); width: 34px; height: 34px; border-radius: 9px; flex: none;
+    display: grid; place-items: center; margin-top: 2px;
+  }
+  .card h3 { font-family: var(--serif); font-size: 25px; font-weight: 600; margin: 0 0 3px;
+             letter-spacing: -.005em; line-height: 1.15; }
+  .card .role { font-size: 13px; color: var(--ink-faint); text-transform: uppercase;
+                letter-spacing: .06em; font-weight: 600; }
+  .card .purpose { font-size: 15.5px; color: var(--ink-soft); margin: 14px 0 22px;
+                   max-width: 68ch; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; gap: 20px; } }
+
+  .block h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .09em;
+    margin: 0 0 12px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
+  .block h4::before { content: ""; width: 7px; height: 7px; border-radius: 2px; }
+  .block.up h4 { color: var(--upload); }   .block.up h4::before { background: var(--upload); }
+  .block.act h4 { color: var(--action); }  .block.act h4::before { background: var(--action); }
+  .block.out h4 { color: var(--output); }  .block.out h4::before { background: var(--output); }
+
+  ul.files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  ul.files li { font-size: 14px; display: flex; gap: 9px; align-items: baseline; }
+  ul.files li::before { content: "▸"; color: var(--upload); font-size: 11px; }
+  ul.files .opt { color: var(--ink-faint); font-size: 12.5px; }
+
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: st;
+             display: flex; flex-direction: column; gap: 10px; }
+  ol.steps li { counter-increment: st; font-size: 14px; display: flex; gap: 11px; align-items: baseline; }
+  ol.steps li::before {
+    content: counter(st); font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+    color: var(--action); background: var(--accent-wash); border-radius: 50%;
+    width: 20px; height: 20px; flex: none; display: grid; place-items: center; line-height: 1;
+    align-self: flex-start; margin-top: 2px;
+  }
+  .outbox { font-size: 14px; color: var(--ink-soft); }
+  .outbox .sheets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+  .chip { font-family: var(--mono); font-size: 11.5px; background: var(--paper-2);
+          border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; color: var(--ink-soft); }
+
+  .note {
+    margin-top: 22px; padding: 13px 16px; background: var(--warn-bg);
+    border: 1px solid var(--warn-line); border-radius: 10px; font-size: 13.5px;
+    color: var(--warn-ink); display: flex; gap: 10px;
+  }
+  .note b { color: var(--warn-ink); }
+  .note .ico { flex: none; width: 17px; height: 17px; margin-top: 2px; }
+
+  code { font-family: var(--mono); font-size: .85em; background: var(--paper-2);
+         border: 1px solid var(--line); border-radius: 5px; padding: .5px 5px; color: var(--ink); }
+  .card code { white-space: nowrap; }
+
+  footer { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--line);
+           font-size: 13px; color: var(--ink-faint); }
+  footer b { color: var(--ink-soft); }
+
+  a.anchor { color: inherit; text-decoration: none; }
+
+  @media (max-width: 860px) {
+    .wrap { grid-template-columns: 1fr; }
+    nav.rail { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line);
+               padding: 28px 24px; }
+    .rail ol { columns: 2; column-gap: 8px; }
+    main { padding: 36px 24px 72px; }
+    h1 { font-size: 33px; }
+    .card { padding: 24px 22px; }
+  }
+
+  @media print {
+    :root { --paper: #ffffff; --card: #ffffff; }
+    body { font-size: 12.5px; }
+    .wrap { display: block; max-width: none; }
+    nav.rail { display: none; }
+    main { padding: 0 6px; }
+    .hero { padding-bottom: 20px; margin-bottom: 24px; }
+    h1 { font-size: 30px; }
+    .lede { font-size: 15px; }
+    .card, .basic, .tablewrap, .note { box-shadow: none; }
+    .card, .basic, .note { break-inside: avoid; page-break-inside: avoid; }
+    h2.section { break-after: avoid; page-break-after: avoid; }
+    .card > header, .block { break-inside: avoid; }
+    a { color: inherit; text-decoration: none; }
+    tbody tr:hover, .rail a:hover { background: transparent; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="rail">
+    <p class="mark">Tree of Life<br><span>Ops Dashboards</span></p>
+    <p class="sub">Training Guide</p>
+    <a class="toplink" href="#start">Getting started ↑</a>
+    <a class="toplink" href="#quickref">Quick reference</a>
+    <hr>
+    <ol>
+      <li><a href="#d1"><span class="n">1</span> Supplier Compliance</a></li>
+      <li><a href="#d2"><span class="n">2</span> Delivery Fill Rate</a></li>
+      <li><a href="#d3"><span class="n">3</span> Sales Order Fill Rate</a></li>
+      <li><a href="#d4"><span class="n">4</span> Daily Short Report</a></li>
+      <li><a href="#d5"><span class="n">5</span> Overstock Report</a></li>
+      <li><a href="#d6"><span class="n">6</span> Donate / Dispose List</a></li>
+      <li><a href="#d7"><span class="n">7</span> Risky Inventory</a></li>
+      <li><a href="#d8"><span class="n">8</span> Batch Quality Analysis</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <div class="hero" id="start">
+      <p class="eyebrow">Inbound &amp; Supply-Chain Operations</p>
+      <h1>How to use the Tree&nbsp;of&nbsp;Life dashboards</h1>
+      <p class="lede">Eight self-serve tools, one app. Each takes an Excel export you already
+        pull from SAP, applies the team's rules, and hands back a finished, download-ready
+        workbook. This guide walks you through every one — what to upload, which buttons to
+        press, and what comes out.</p>
+    </div>
+
+    <h2 class="section">Before you start — the basics</h2>
+    <div class="basics">
+      <div class="basic">
+        <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16M4 12h16M4 19h16"/></svg>Open the app</h3>
+        <p>Go to the app link in your browser. Use the <b>menu on the left</b> to switch between the eight dashboards — the list matches the numbers in this guide.</p>
+      </div>
+      <div class="basic">
+        <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>Upload Excel</h3>
+        <p>Every dashboard runs on the <code>.xlsx</code> exports you already download from SAP or the portal. Drag the file in, or click to browse.</p>
+      </div>
+      <div class="basic">
+        <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>Download the result</h3>
+        <p>After processing, click the green <b>Download</b> button to save the finished workbook. Preview tables on screen first if you want to check it.</p>
+      </div>
+      <div class="basic">
+        <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3l8 4v5c0 4.5-3 7.5-8 9-5-1.5-8-4.5-8-9V7z"/></svg>Nothing is stored</h3>
+        <p>Files are processed in your session and cleared when you leave. Nothing is saved on a server, so re-upload each time you run a report.</p>
+      </div>
+    </div>
+
+    <h2 class="section" id="quickref">Quick reference — which tool, which files</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>#</th><th>Dashboard</th><th>What you upload</th><th>What you get back</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="num">1</span></td><td><a class="anchor" href="#d1"><b>Supplier Compliance</b></a></td><td class="files">SAP PO export <span class="dash">+</span> Portal upload export</td><td>Compliance workbook + per-supplier bill-back tabs</td></tr>
+          <tr><td><span class="num">2</span></td><td><a class="anchor" href="#d2"><b>Delivery Fill Rate</b></a></td><td class="files">SAP/BW Delivery Fill Rate export</td><td>Shortage &amp; fill-rate report (Excel)</td></tr>
+          <tr><td><span class="num">3</span></td><td><a class="anchor" href="#d3"><b>Sales Order Fill Rate</b></a></td><td class="files">SAP/BW Sales Order Fill Rate export</td><td>Unconfirmed-demand &amp; fill-rate report (Excel)</td></tr>
+          <tr><td><span class="num">4</span></td><td><a class="anchor" href="#d4"><b>Daily Short Report</b></a></td><td class="files">SAPUI5 Daily Short export</td><td>Order→invoice shorts by stage (Excel)</td></tr>
+          <tr><td><span class="num">5</span></td><td><a class="anchor" href="#d5"><b>Overstock Report</b></a></td><td class="files">Materials inventory <span class="dash">+</span> Last-Sell / BDM master</td><td>3-warehouse overstock workbook</td></tr>
+          <tr><td><span class="num">6</span></td><td><a class="anchor" href="#d6"><b>Donate / Dispose List</b></a></td><td class="files">Materials inventory <span class="dash">+</span> Last-Sell / BDM master</td><td>3-warehouse donate/dispose workbook</td></tr>
+          <tr><td><span class="num">7</span></td><td><a class="anchor" href="#d7"><b>Risky Inventory</b></a></td><td class="files">90-day report <span class="dash">+</span> 180-day cumulative report</td><td>4-sheet de-duplicated workbook</td></tr>
+          <tr><td><span class="num">8</span></td><td><a class="anchor" href="#d8"><b>Batch Quality Analysis</b></a></td><td class="files">SAP receiving-history export</td><td>Flagged batch/expiry issues + AI review (Excel)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 class="section">The eight dashboards, one by one</h2>
+
+    <!-- 1 -->
+    <section class="card" id="d1">
+      <header>
+        <div class="badge">1</div>
+        <div><h3>Supplier Compliance Dashboard</h3><div class="role">Did suppliers upload their inbound documents?</div></div>
+      </header>
+      <p class="purpose">Matches every SAP purchase order that has an inbound delivery against the documents suppliers uploaded to the portal for a given month. Suppliers with an inbound PO but no valid portal file are flagged as non-compliant and billed back automatically.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>SAP PO export</b> <span class="opt">(<code>.xlsx</code> — PO numbers, inbound delivery status, dates)</span></li>
+            <li>The <b>Portal upload export</b> <span class="opt">(<code>.xlsx</code> — the supplier document list)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the SAP export on the left, the Portal export on the right.</li>
+            <li>Pick the <b>Report Year</b> and <b>Report Month</b>.</li>
+            <li>Click <b>Generate Compliance Report</b>.</li>
+            <li>Review the on-screen Monthly Summary and compliance %.</li>
+            <li>Click <b>Download Excel report</b>.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A multi-sheet workbook: Monthly Summary, matched vs. missing documents, pending TOL review, and a separate <b>bill-back tab per non-compliant supplier</b> with the charge owed.
+          <div class="sheets"><span class="chip">Monthly Summary</span><span class="chip">Missing Portal File</span><span class="chip">Pending TOL Review</span><span class="chip">Supplier Summary</span><span class="chip">BB-{Supplier}</span></div>
+        </div>
+      </div>
+      <div class="note">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+        <div>The month scope is a <b>fixed audit rule</b>: a PO counts for the month if <b>any</b> of its date columns falls in that month — there's no setting to change it. Excluded PO types (certain prefixes) are dropped automatically and reported on screen.</div>
+      </div>
+    </section>
+
+    <!-- 2 -->
+    <section class="card" id="d2">
+      <header>
+        <div class="badge">2</div>
+        <div><h3>Delivery Fill Rate Dashboard</h3><div class="role">Where are we shorting outbound deliveries?</div></div>
+      </header>
+      <p class="purpose">Reads a SAP/BW Delivery Fill Rate export and shows shortages and fill rates by plant, product, and product group, highlighting the biggest-dollar shortfalls so you know where to chase supply first.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>SAP/BW Delivery Fill Rate export</b> <span class="opt">(<code>.xlsx</code> or <code>.xls</code>)</span></li>
+          </ul>
+          <p style="font-size:13px;color:var(--ink-faint);margin:14px 0 0">The app finds the real header row and fills SAP merged cells for you.</p>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Open the sidebar and upload the export.</li>
+            <li>Set the <b>High Priority $ threshold</b> (default $1,000) to flag big shortages.</li>
+            <li>Optionally narrow with the <b>Filters</b> — plant, product, product group, date, status.</li>
+            <li>Read the KPIs and charts; open the <b>Download</b> tab.</li>
+            <li>Click <b>Generate</b>, then download the Excel report.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">On-screen fill-rate KPIs, top-10 shortages, and plant/product breakdowns — plus a polished Excel report reflecting whatever filters you left active.
+          <div class="sheets"><span class="chip">Summary</span><span class="chip">Shortage Report</span><span class="chip">By Plant</span><span class="chip">By Product</span><span class="chip">Top 10</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 -->
+    <section class="card" id="d3">
+      <header>
+        <div class="badge">3</div>
+        <div><h3>Sales Order Fill Rate Dashboard</h3><div class="role">How much demand is unconfirmed, and for whom?</div></div>
+      </header>
+      <p class="purpose">The demand-side twin of the delivery dashboard. Reads a SAP/BW Sales Order Fill Rate export and surfaces unconfirmed demand and fill rates by key account, CDM, product, and plant.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>SAP/BW Sales Order Fill Rate export</b> <span class="opt">(<code>.xlsx</code> or <code>.xls</code>)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the export from the sidebar.</li>
+            <li>Set the <b>High Priority $ threshold</b> (default $500) on unconfirmed demand.</li>
+            <li>Filter by key account, plant, product, CDM, status, or priority; choose a sort order.</li>
+            <li>Review KPIs and breakdowns on screen.</li>
+            <li>Generate and download the Excel report.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">Unconfirmed-demand KPIs, an unconfirmed-lines report, and account / CDM / product / plant summaries, exported to Excel.
+          <div class="sheets"><span class="chip">Summary</span><span class="chip">Unconfirmed Report</span><span class="chip">By Account</span><span class="chip">By CDM</span><span class="chip">Top 10</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="card" id="d4">
+      <header>
+        <div class="badge">4</div>
+        <div><h3>Daily Short Report Dashboard</h3><div class="role">Where does quantity fall out between order and invoice?</div></div>
+      </header>
+      <p class="purpose">Takes the SAPUI5 Daily Short export and traces every case from ordered → confirmed → delivered → invoiced, showing the fill rate at each hand-off and the lines shorted along the way.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>SAPUI5 Daily Short export</b> <span class="opt">(<code>.xlsx</code> or <code>.xls</code>)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the export from the sidebar.</li>
+            <li>Choose <b>Top N per table</b> (default Top 5) and any filters — plant, customer, vendor, order type, date.</li>
+            <li>Read the <b>Overview</b> waterfall, then the Unconfirmed / Shorted-at-Delivery / Shorted-at-Invoicing tabs.</li>
+            <li>Open the <b>Download</b> tab and click <b>Generate Excel Report</b>.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A workbook with a Summary of totals and fill rates, one sheet per short-analysis stage, and a Raw Data sheet with every line behind the numbers.
+          <div class="sheets"><span class="chip">Summary</span><span class="chip">Unconfirmed</span><span class="chip">Shorted at Delivery</span><span class="chip">Shorted at Invoicing</span><span class="chip">Raw Data</span></div>
+        </div>
+      </div>
+      <div class="note">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+        <div>The template's own summary/total rows at the bottom of the export are <b>detected and excluded automatically</b> — you don't need to trim the file first.</div>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="card" id="d5">
+      <header>
+        <div class="badge">5</div>
+        <div><h3>Overstock Report Dashboard</h3><div class="role">What stock is piling up near its last sellable date?</div></div>
+      </header>
+      <p class="purpose">Matches on-hand inventory to the Last-Sell / BDM master and flags excess stock that is still sellable but approaching its last-sell-by date, split out by warehouse so each site sees its own list.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>Materials inventory export</b> <span class="opt">(<code>.xlsx</code>)</span></li>
+            <li>The <b>Last-Sell / BDM Material Master</b> <span class="opt">(<code>.xlsx</code>)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the Materials file and the Master file.</li>
+            <li>Set the <b>date window</b> — earliest shelf-life expiry to keep, and the last-sell-by cutoff.</li>
+            <li>Click <b>Process files</b>.</li>
+            <li>Preview each warehouse tab, then click <b>Download</b>.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A workbook with one sheet per warehouse, built to the business's overstock spec.
+          <div class="sheets"><span class="chip">Mississauga</span><span class="chip">Calgary</span><span class="chip">Surrey</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="card" id="d6">
+      <header>
+        <div class="badge">6</div>
+        <div><h3>Donate / Dispose List Dashboard</h3><div class="role">What can no longer be sold?</div></div>
+      </header>
+      <p class="purpose">The mirror image of the Overstock report. Uses the same two files to list stock at, near, or past its shelf-life expiry — product that should be donated or disposed of rather than sold — across every storage location, by warehouse.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>Materials inventory export</b> <span class="opt">(same file as Overstock)</span></li>
+            <li>The <b>Last-Sell / BDM Material Master</b> <span class="opt">(same file as Overstock)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the Materials file and the Master file.</li>
+            <li>Set the single cutoff: include shelf-life expiry <b>on or before</b> this date.</li>
+            <li>Click <b>Process files</b>.</li>
+            <li>Preview each warehouse tab, then click <b>Download</b>.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A donate/dispose workbook with one sheet per warehouse.
+          <div class="sheets"><span class="chip">Mississauga</span><span class="chip">Calgary</span><span class="chip">Surrey</span></div>
+        </div>
+      </div>
+      <div class="note">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 4.5-3 7.5-8 9-5-1.5-8-4.5-8-9V7z"/></svg>
+        <div>Overstock and Donate/Dispose are two halves of the same shelf-life picture: what's <b>still sellable but overstocked</b> vs. what's <b>past selling</b>. Same uploads, opposite side of the cutoff date.</div>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="card" id="d7">
+      <header>
+        <div class="badge">7</div>
+        <div><h3>Risky Inventory Dashboard</h3><div class="role">Strip the repeated rows out of the 180-day report</div></div>
+      </header>
+      <p class="purpose">Automates the manual step you do today: the cumulative 180-day report repeats the first 90 days, so this removes those already-reported rows — comparing complete inventory lines, not just the Material number — and rebuilds the four-sheet workbook.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>90-day report</b> <span class="opt">(<code>.xlsx</code>)</span></li>
+            <li>The <b>180-day cumulative report</b> <span class="opt">(<code>.xlsx</code>)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the 90-day report and the 180-day cumulative report.</li>
+            <li>Click <b>Process files</b>.</li>
+            <li>Check the count of rows removed and the cleaned preview.</li>
+            <li>Click <b>Download Risky Inventory Report</b>.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A four-sheet workbook — the 90-day detail and summary, plus the de-duplicated 180-day detail and summary.
+          <div class="sheets"><span class="chip">90D Detail</span><span class="chip">90D Summary</span><span class="chip">180D Detail</span><span class="chip">180D Summary</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="card" id="d8">
+      <header>
+        <div class="badge">8</div>
+        <div><h3>Batch Quality Analysis</h3><div class="role">Catch bad batch numbers &amp; expiry dates for review</div></div>
+      </header>
+      <p class="purpose">Scans the SAP receiving history for likely batch-number and expiry-date data-quality problems, groups them into issues, and runs an AI reviewer over each group to explain the pattern and suggest what to verify. It's a review aid — the AI never edits SAP or invents corrected values.</p>
+      <div class="grid">
+        <div class="block up">
+          <h4>Files you upload</h4>
+          <ul class="files">
+            <li>The <b>SAP receiving-history export</b> <span class="opt">(<code>.xlsx</code>)</span></li>
+          </ul>
+        </div>
+        <div class="block act">
+          <h4>Steps</h4>
+          <ol class="steps">
+            <li>Upload the receiving export.</li>
+            <li>Click <b>Process Batch Quality File</b> — detection and the AI review run together.</li>
+            <li>Work through the tabs: Summary → Flagged Issues → Material Batch History → Review Results.</li>
+            <li>Download the Excel review pack.</li>
+          </ol>
+        </div>
+      </div>
+      <div class="block out" style="margin-top:24px">
+        <h4>What you get</h4>
+        <div class="outbox">A flagged-issues workbook with each issue's risk level, the records involved, the AI's summary and recommended review steps, and questions to put to the supplier or receiver.
+          <div class="sheets"><span class="chip">Upload &amp; Summary</span><span class="chip">Flagged Issues</span><span class="chip">Material Batch History</span><span class="chip">Review Results</span></div>
+        </div>
+      </div>
+      <div class="note">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>
+        <div>Treat the AI output as a <b>starting point for human judgment</b>, not a decision. It highlights patterns worth checking; a person confirms and fixes the data in SAP.</div>
+      </div>
+    </section>
+
+    <footer>
+      <p><b>Rule of thumb:</b> pick the dashboard from the left menu, upload the Excel it asks for, press the primary button, then download the workbook. If a file won't load, the tool prints a plain-English error — check you uploaded the right export, then try again.</p>
+      <p style="margin-top:10px">Tree of Life · Inbound &amp; Supply-Chain Operations · Internal dashboard training guide</p>
+    </footer>
+  </main>
+</div>
+</body>
+</html>

@@ -31,9 +31,14 @@ from .config import (
     PORTAL_PENDING_STATUSES,
     PORTAL_STATUS_INVALID,
     PORTAL_VALID_STATUSES,
+    RECEIVING_ACCURACY_COLUMNS,
+    RECEIVING_AUDIT_COLUMNS,
+    RECEIVING_NO,
+    RECEIVING_YES,
     SAP_FILTER_DATE_COLUMNS,
 )
 from .normalizer import has_value
+from .receiving_importer import build_po_lookup
 from .supplier_exceptions import ExceptionRecord, classify_supplier
 
 
@@ -91,6 +96,7 @@ def build_report(
     report_month: int,
     exceptions: dict[str, "ExceptionRecord"] | None = None,
     tracker_names: set[str] | None = None,
+    receiving_df: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Return a dict {sheet_name: dataframe} for every required sheet.
 
@@ -99,8 +105,15 @@ def build_report(
     case every supplier is labelled "Expected to upload" and the report is
     identical to one built before this feature existed.
 
-    Exceptions are INFORMATIONAL. They deliberately do not affect bill-back or
-    the compliance percentage.
+    ``receiving_df`` is optional. When supplied, the dock's observations are
+    joined on PO to add *document accuracy* -- whether the batch, BBD, and
+    quantity on the paperwork matched the goods.
+
+    Both inputs are INFORMATIONAL. Neither exceptions nor document accuracy
+    affect bill-back or the compliance percentage: those stay defined solely by
+    portal file presence, so the audited number keeps the meaning it has always
+    had. An exempt supplier is still reported on for accuracy -- being excused
+    from uploading says nothing about whether their batch codes are correct.
     """
     exceptions = exceptions or {}
     tracker_names = tracker_names or set()
@@ -198,6 +211,10 @@ def build_report(
 
     # One row per unique PO for the per-PO sheets.
     sap_unique = sap_valid.drop_duplicates(subset="Normalized PO Number", keep="first").copy()
+
+    # --- Receiving log join (optional) ---------------------------------------
+    has_receiving = receiving_df is not None and not receiving_df.empty
+    sap_unique = _annotate_receiving(sap_unique, receiving_df if has_receiving else None)
 
     # --- Compliance buckets --------------------------------------------------
     matched = sap_unique[sap_unique["Has Inbound"] & sap_unique["Portal Match"]].copy()
@@ -311,6 +328,47 @@ def build_report(
         }
     )
 
+    # Document accuracy is appended as its own block so the compliance metrics
+    # above keep their exact position and meaning in the audited summary.
+    if has_receiving:
+        accuracy_exceptions = _accuracy_exceptions(sap_unique)
+        disagreements = _receiving_vs_portal(sap_unique)
+        logged = sap_unique[sap_unique["Receiving Logged"]]
+        checked = sap_unique[sap_unique["Doc Accuracy Checked"]]
+        checked_count = checked["Normalized PO Number"].nunique()
+        failed_count = accuracy_exceptions["PO Number"].nunique() if not accuracy_exceptions.empty else 0
+        accuracy_pct = (
+            (checked_count - failed_count) / checked_count if checked_count else 0.0
+        )
+        wrong = {
+            col: sap_unique[sap_unique[col] == RECEIVING_NO]["Normalized PO Number"].nunique()
+            for col in RECEIVING_ACCURACY_COLUMNS
+        }
+        summary = pd.concat([summary, pd.DataFrame({
+            "Metric": [
+                "--- Receiving Log (document accuracy) ---",
+                "SAP POs Found In Receiving Log",
+                "SAP POs With A Document Accuracy Check",
+                "  ...with wrong batch",
+                "  ...with wrong BBD",
+                "  ...with wrong quantity",
+                "POs Failing Any Accuracy Check",
+                "Document Accuracy Percentage",
+                "Portal vs Receiving Log Disagreements",
+            ],
+            "Value": [
+                "",
+                logged["Normalized PO Number"].nunique(),
+                checked_count,
+                wrong["Correct Batch"],
+                wrong["Correct BBD"],
+                wrong["Correct QTY"],
+                failed_count,
+                f"{accuracy_pct:.1%}",
+                len(disagreements),
+            ],
+        })], ignore_index=True)
+
     sheets = {
         "Monthly Summary": summary,
         "Portal Export Data": _portal_sheet(portal),
@@ -323,13 +381,159 @@ def build_report(
         "No Inbound Yet": _no_inbound_yet_columns(no_inbound_yet),
         "Closed POs Review": _review_columns(closed),
         "Processing POs Review": _review_columns(processing),
-        "Supplier Summary": _supplier_summary(sap_unique),
+        "Supplier Summary": _supplier_summary(sap_unique, has_receiving),
         "Should Have Uploaded": _should_have_uploaded(sap_unique),
         "Exempt But Submitting": _exempt_but_submitting(sap_unique),
-        "Warehouse Summary": _warehouse_summary(sap_unique),
+        "Warehouse Summary": _warehouse_summary(sap_unique, has_receiving),
     }
+    if has_receiving:
+        sheets["Document Accuracy Exceptions"] = accuracy_exceptions
+        sheets["Portal vs Receiving Log"] = disagreements
+        sheets["Receiving Log Data"] = _receiving_sheet(receiving_df)
     sheets.update(_billback_sheets(missing))
     return sheets
+
+
+# ---------------------------------------------------------------------------
+# Receiving log / document accuracy
+# ---------------------------------------------------------------------------
+def _annotate_receiving(
+    sap_unique: pd.DataFrame, receiving_df: pd.DataFrame | None
+) -> pd.DataFrame:
+    """Attach the dock's observations to each SAP PO.
+
+    Always produces the same columns so every downstream rollup can be written
+    without branching. With no receiving log the answers are simply all blank
+    and every derived flag is False.
+    """
+    out = sap_unique.copy()
+    blank = pd.Series("", index=out.index, dtype=object)
+
+    if receiving_df is None or receiving_df.empty or out.empty:
+        for col in RECEIVING_AUDIT_COLUMNS:
+            out[col] = blank
+        out["Receiving Carrier"] = blank
+        out["Receiving Date"] = pd.NaT
+        out["Receiving Logged"] = False
+    else:
+        lookup = build_po_lookup(receiving_df)
+        keys = out["Normalized PO Number"]
+        for col in RECEIVING_AUDIT_COLUMNS:
+            if col in lookup.columns:
+                out[col] = _map_lookup(keys, lookup[col]).fillna("")
+            else:
+                out[col] = blank
+        out["Receiving Carrier"] = (
+            _map_lookup(keys, lookup["Carrier"]).fillna("")
+            if "Carrier" in lookup.columns else blank
+        )
+        out["Receiving Date"] = (
+            _map_lookup(keys, lookup["Receiving Date"])
+            if "Receiving Date" in lookup.columns else pd.NaT
+        )
+        out["Receiving Logged"] = keys.isin(set(lookup.index))
+
+    # A PO is "checked" once the dock answered at least one accuracy question.
+    # Unanswered POs must not count as passes -- most of the log is blank, and
+    # treating blank as YES would invent an accuracy rate that isn't real.
+    answered = [out[c].isin({RECEIVING_YES, RECEIVING_NO}) for c in RECEIVING_ACCURACY_COLUMNS]
+    failed = [out[c] == RECEIVING_NO for c in RECEIVING_ACCURACY_COLUMNS]
+    out["Doc Accuracy Checked"] = (
+        pd.concat(answered, axis=1).any(axis=1) if answered and not out.empty
+        else pd.Series(False, index=out.index)
+    )
+    out["Doc Accuracy Failed"] = (
+        pd.concat(failed, axis=1).any(axis=1) if failed and not out.empty
+        else pd.Series(False, index=out.index)
+    )
+    return out
+
+
+def _accuracy_exceptions(sap_unique: pd.DataFrame) -> pd.DataFrame:
+    """POs where the dock recorded at least one wrong batch, BBD, or quantity."""
+    rows = sap_unique[sap_unique["Doc Accuracy Failed"]].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=[
+            "PO Number", "Vendor Number", "Vendor Name", "Warehouse",
+            "Receiving Date", "Receiving Carrier", "Correct Batch",
+            "Correct BBD", "Correct QTY", "Portal File Status", "Issue",
+        ])
+    rows["Issue"] = _apply_rows(rows, _accuracy_issue_text)
+    return rows[[
+        "Normalized PO Number", "Vendor Number", "Vendor Name", "Warehouse",
+        "Receiving Date", "Receiving Carrier", "Correct Batch", "Correct BBD",
+        "Correct QTY", "Portal File Status", "Issue",
+    ]].rename(columns={"Normalized PO Number": "PO Number"})
+
+
+def _accuracy_issue_text(row) -> str:
+    wrong = [
+        label
+        for col, label in (
+            ("Correct Batch", "batch"),
+            ("Correct BBD", "BBD"),
+            ("Correct QTY", "quantity"),
+        )
+        if row.get(col) == RECEIVING_NO
+    ]
+    return "Document did not match goods received: " + ", ".join(wrong) + "."
+
+
+def _receiving_vs_portal(sap_unique: pd.DataFrame) -> pd.DataFrame:
+    """POs where the dock and the portal disagree about the inbound file.
+
+    Two independent records of the same fact. Every disagreement is either a
+    portal/SAP data problem or a dock data-entry problem -- both are worth
+    chasing, and neither is visible from either source alone.
+    """
+    rows = sap_unique[
+        sap_unique["Receiving Logged"]
+        & sap_unique["Has Inbound"]
+        & sap_unique["Inbound File Received"].isin({RECEIVING_YES, RECEIVING_NO})
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=[
+            "PO Number", "Vendor Number", "Vendor Name", "Warehouse",
+            "Receiving Date", "Portal File Found", "Receiving Log Says",
+            "Disagreement",
+        ])
+
+    portal_yes = rows["Portal Match"]
+    dock_yes = rows["Inbound File Received"] == RECEIVING_YES
+    rows = rows[portal_yes != dock_yes].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=[
+            "PO Number", "Vendor Number", "Vendor Name", "Warehouse",
+            "Receiving Date", "Portal File Found", "Receiving Log Says",
+            "Disagreement",
+        ])
+
+    rows["Portal File Found"] = rows["Portal Match"].map({True: "Yes", False: "No"})
+    rows["Receiving Log Says"] = rows["Inbound File Received"].str.title()
+    rows["Disagreement"] = rows["Portal Match"].map({
+        True: "Portal has a file but the dock recorded none received.",
+        False: "Dock recorded a file received but no valid portal upload exists.",
+    })
+    return rows[[
+        "Normalized PO Number", "Vendor Number", "Vendor Name", "Warehouse",
+        "Receiving Date", "Portal File Found", "Receiving Log Says",
+        "Disagreement",
+    ]].rename(columns={"Normalized PO Number": "PO Number"})
+
+
+def _receiving_sheet(receiving_df: pd.DataFrame | None) -> pd.DataFrame:
+    """The month-filtered receiving log itself, for audit trail."""
+    if receiving_df is None or receiving_df.empty:
+        return pd.DataFrame()
+    cols = [
+        "Receiving Date", "Normalized PO Number", "PO Number", "Carrier",
+        "Inbound File Received", "Correct Batch", "Correct BBD", "Correct QTY",
+        "Results of Inspection", "Receiver Initials", "Comments", "Source Sheet",
+    ]
+    present = [c for c in cols if c in receiving_df.columns]
+    return receiving_df[present].rename(
+        columns={"Normalized PO Number": "Matched PO", "PO Number": "PO Cell (as typed)"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +899,28 @@ def _exempt_but_submitting(sap_unique: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _supplier_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
+def _accuracy_rollup(g: pd.DataFrame) -> dict:
+    """Document-accuracy columns for one supplier/warehouse group.
+
+    The denominator is POs the dock actually checked, not all POs -- most of
+    the log is unanswered, so dividing by everything would report an accuracy
+    rate that no one measured.
+    """
+    checked = g[g["Doc Accuracy Checked"]]["Normalized PO Number"].nunique()
+    failed = g[g["Doc Accuracy Failed"]]["Normalized PO Number"].nunique()
+    pct = ((checked - failed) / checked) if checked else 0.0
+    return {
+        "Doc Accuracy Checked POs": checked,
+        "Wrong Batch": g[g["Correct Batch"] == RECEIVING_NO]["Normalized PO Number"].nunique(),
+        "Wrong BBD": g[g["Correct BBD"] == RECEIVING_NO]["Normalized PO Number"].nunique(),
+        "Wrong QTY": g[g["Correct QTY"] == RECEIVING_NO]["Normalized PO Number"].nunique(),
+        "Document Accuracy Percentage": f"{pct:.1%}" if checked else "n/a",
+    }
+
+
+def _supplier_summary(
+    sap_unique: pd.DataFrame, include_receiving: bool = False
+) -> pd.DataFrame:
     rows = []
     for (vendor_num, vendor_name), g in sap_unique.groupby(
         ["Vendor Number", "Vendor Name"], dropna=False
@@ -718,7 +943,7 @@ def _supplier_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
             else EXCEPTION_STATUS_EXPECTED
         )
         pct = (found / with_inbound) if with_inbound else 0.0
-        rows.append({
+        row = {
             "Vendor Number": vendor_num,
             "Vendor Name": vendor_name,
             "Exception Status": status,
@@ -731,11 +956,16 @@ def _supplier_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
             "Closed POs": closed_n,
             "Processing POs": processing_n,
             "Compliance Percentage": f"{pct:.1%}",
-        })
+        }
+        if include_receiving:
+            row.update(_accuracy_rollup(g))
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
-def _warehouse_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
+def _warehouse_summary(
+    sap_unique: pd.DataFrame, include_receiving: bool = False
+) -> pd.DataFrame:
     rows = []
     for warehouse, g in sap_unique.groupby("Warehouse", dropna=False):
         total = g["Normalized PO Number"].nunique()
@@ -747,7 +977,7 @@ def _warehouse_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
         ].nunique()
         portal_no_inb = g[~g["Has Inbound"] & g["Portal Match"]]["Normalized PO Number"].nunique()
         pct = (found / with_inbound) if with_inbound else 0.0
-        rows.append({
+        row = {
             "Warehouse": warehouse,
             "Total SAP POs": total,
             "SAP POs With Inbound Delivery": with_inbound,
@@ -756,5 +986,8 @@ def _warehouse_summary(sap_unique: pd.DataFrame) -> pd.DataFrame:
             "Invalid Portal Uploads": invalid_uploads,
             "Portal Files With No SAP Inbound": portal_no_inb,
             "Compliance Percentage": f"{pct:.1%}",
-        })
+        }
+        if include_receiving:
+            row.update(_accuracy_rollup(g))
+        rows.append(row)
     return pd.DataFrame(rows)

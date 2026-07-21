@@ -8,6 +8,7 @@ import streamlit as st
 from src.compliance_engine import build_report
 from src.config import EXCLUDED_PO_PREFIXES, MONTH_NAMES, SAP_FILTER_DATE_COLUMNS
 from src.portal_importer import PortalImportError, load_portal
+from src.receiving_importer import ReceivingImportError, load_receiving
 from src.report_generator import generate_workbook
 from src.sap_importer import SapImportError, describe_missing_optionals, load_sap
 from src.supplier_exceptions_ui import load_exceptions_or_empty, render_exception_manager
@@ -24,6 +25,18 @@ with col_sap:
     sap_file = st.file_uploader("1. SAP Export (.xlsx)", type=["xlsx"], key="sap")
 with col_portal:
     portal_file = st.file_uploader("2. Portal Export (.xlsx)", type=["xlsx"], key="portal")
+
+receiving_file = st.file_uploader(
+    "3. Receiving Log (.xlsx) — optional",
+    type=["xlsx"],
+    key="receiving",
+    help=(
+        "The dock receiving log. Adds document accuracy — whether the batch, "
+        "BBD, and quantity on the paperwork matched the goods received. This "
+        "is reported alongside compliance and never changes the Compliance "
+        "Percentage or the bill-back."
+    ),
+)
 
 today = date.today()
 years = list(range(today.year - 3, today.year + 1))
@@ -90,10 +103,56 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
     if exceptions_error:
         st.info(exceptions_error)
 
+    receiving_df = None
+    if receiving_file is not None:
+        try:
+            with st.spinner("Loading Receiving Log..."):
+                receiving_df = load_receiving(receiving_file, sel_year, sel_month)
+        except ReceivingImportError as e:
+            st.error(f"Receiving Log error: {e}")
+            st.stop()
+
+        attrs = receiving_df.attrs
+        if attrs.get("skipped_sheets"):
+            st.info(
+                "Receiving Log: skipped sheet(s) without the audit columns — "
+                + ", ".join(attrs["skipped_sheets"])
+            )
+        if receiving_df.empty:
+            st.warning(
+                f"Receiving Log has no rows for {MONTH_NAMES[sel_month - 1]} "
+                f"{sel_year}. Document accuracy will not be reported."
+            )
+            receiving_df = None
+        else:
+            unmatched = attrs.get("rows_without_po", 0)
+            note = (
+                f"Receiving Log: {attrs.get('rows_in_month', 0):,} row(s) in "
+                f"{MONTH_NAMES[sel_month - 1]} {sel_year}."
+            )
+            if unmatched:
+                note += (
+                    f" {unmatched:,} had no PO number and cannot be matched."
+                )
+            st.info(note)
+
+            non_po = attrs.get("non_po_references", [])
+            if non_po:
+                with st.expander(
+                    f"{len(non_po)} receiving-log reference(s) that aren't SAP POs"
+                ):
+                    st.caption(
+                        "Hand-typed carrier or supplier references. They can't "
+                        "be matched to SAP, so those receipts are absent from "
+                        "the accuracy figures."
+                    )
+                    st.write(", ".join(non_po))
+
     with st.spinner("Applying compliance rules..."):
         sheets = build_report(
             sap_df, portal_df, sel_year, sel_month,
             exceptions=exceptions, tracker_names=tracker_names,
+            receiving_df=receiving_df,
         )
 
     st.success("Report generated.")
@@ -107,6 +166,34 @@ if st.button("Generate Compliance Report", type="primary", disabled=not ready):
     m2.metric("Inbound w/ Portal File", summary["SAP Inbound POs With Portal File"])
     m3.metric("Inbound Missing Portal", summary["SAP Inbound POs Missing Portal File"])
     m4.metric("Compliance %", summary["Compliance Percentage"])
+
+    if receiving_df is not None:
+        st.subheader("Document Accuracy (from Receiving Log)")
+        checked = int(summary["SAP POs With A Document Accuracy Check"])
+        failed = int(summary["POs Failing Any Accuracy Check"])
+        disagreements = int(summary["Portal vs Receiving Log Disagreements"])
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("POs Checked At Dock", checked)
+        a2.metric("Failing Any Check", failed)
+        a3.metric("Doc Accuracy %", summary["Document Accuracy Percentage"])
+        a4.metric("Portal vs Log Conflicts", disagreements)
+
+        total_inbound = int(summary["Total SAP POs With Inbound Delivery"])
+        if total_inbound and checked < total_inbound:
+            st.caption(
+                f"⚠️ Coverage: only **{checked} of {total_inbound}** inbound POs "
+                "were checked at the dock. Document Accuracy % describes those "
+                "POs only — it is not a rate for all suppliers, and a supplier "
+                "with no checks shows `n/a`. Compliance % and bill-back are "
+                "unaffected by this section."
+            )
+        if disagreements:
+            st.caption(
+                f"**{disagreements} PO(s)** where the portal and the dock "
+                "disagree about whether an inbound file exists — see the "
+                "`Portal vs Receiving Log` sheet. Each one is either a portal "
+                "data problem or a dock data-entry problem."
+            )
 
     billback_tabs = {k: v for k, v in sheets.items() if k.startswith("BB-")}
     if billback_tabs:
