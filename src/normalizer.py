@@ -14,8 +14,10 @@ import re
 import unicodedata
 import pandas as pd
 
-# Anything that could plausibly separate POs in a free-text portal cell.
-_SPLIT_RE = re.compile(r"[,/;\n\r\t ]+")
+# Anything that could plausibly separate POs in a free-text portal or
+# receiving-log cell. "&" appears in hand-typed dock log cells ("123 & 456");
+# it can never occur inside a PO number, so splitting on it is safe.
+_SPLIT_RE = re.compile(r"[,/;&\n\r\t ]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 

@@ -115,6 +115,78 @@ SAP_FILTER_DATE_COLUMNS = [
     "Est PU Date",
 ]
 
+# ---------------------------------------------------------------------------
+# Receiving Log (optional third input)
+# ---------------------------------------------------------------------------
+# The dock receiving log records what the receiver physically observed. It
+# answers a question the portal structurally cannot: not "was a file uploaded"
+# but "did the document's contents match the goods on the truck".
+#
+# Document accuracy is reported SEPARATELY from compliance. It never changes
+# the Compliance Percentage or the bill-back -- those stay defined purely by
+# portal file presence, so the audited number keeps its existing meaning.
+RECEIVING_CANONICAL_COLUMNS = [
+    "Receiving Date",
+    "PO Number",
+    "Carrier",
+    "Inbound File Received",
+    "Correct Batch",
+    "Correct BBD",
+    "Correct QTY",
+    "Results of Inspection",
+    "Receiver Initials",
+    "Comments",
+]
+
+# Real receiving-log headers drift in spacing ("Y / N" vs "Y/N") and the sheet
+# schema changed mid-year. Aliases are matched on a whitespace-stripped,
+# lowercased form of the header so spacing never breaks the import.
+RECEIVING_COLUMN_ALIASES = {
+    "date": "Receiving Date",
+    "po#": "PO Number",
+    "po": "PO Number",
+    "ponumber": "PO Number",
+    "ponumber(s)": "PO Number",
+    "carrier": "Carrier",
+    "inboundfiley/n": "Inbound File Received",
+    "inboundfile": "Inbound File Received",
+    "correctbatchreceivedy/n": "Correct Batch",
+    "correctbatchreceived": "Correct Batch",
+    "correctbbdreceivedy/n": "Correct BBD",
+    "correctbbdreceived": "Correct BBD",
+    "correctqtyreceivedy/n": "Correct QTY",
+    "correctqtyreceived": "Correct QTY",
+    "resultsofinspection": "Results of Inspection",
+    "receiverinitials": "Receiver Initials",
+    "comments": "Comments",
+}
+
+# A receiving-log sheet is only usable if it carries at least one of these.
+# The Jan-Apr sheets use the older 14-column schema that predates the audit
+# columns entirely -- those sheets are skipped, not treated as all-blank.
+RECEIVING_AUDIT_COLUMNS = [
+    "Inbound File Received",
+    "Correct Batch",
+    "Correct BBD",
+    "Correct QTY",
+]
+
+# The three columns that make up the document-accuracy check.
+RECEIVING_ACCURACY_COLUMNS = ["Correct Batch", "Correct BBD", "Correct QTY"]
+
+# The dock log's PO cell is hand-typed and mixes in references that are not
+# SAP POs at all: carrier refs (TR-34306), supplier PO numbers (GHPO-23467),
+# free text ("Return", "SILANI"), and short internal numbers (7176). SAP POs
+# are purely numeric and at least this long. Anything else is dropped from the
+# join and counted, so the log's real coverage is visible rather than implied.
+RECEIVING_MIN_PO_DIGITS = 7
+
+# Free-text Y/N answers normalize to exactly these, or "" for unanswered.
+RECEIVING_YES = "YES"
+RECEIVING_NO = "NO"
+RECEIVING_YES_VALUES = {"YES", "Y", "YES ", "TRUE", "1"}
+RECEIVING_NO_VALUES = {"NO", "N", "FALSE", "0"}
+
 # Compliance labels used in the report
 COMPLIANT = "Submitted / Compliant"
 NON_COMPLIANT = "Missing Portal File / Non-Compliant"
