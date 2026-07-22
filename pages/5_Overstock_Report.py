@@ -1,8 +1,9 @@
 """Overstock Report — flags excess stock approaching its last sellable date.
 
-Upload the Materials inventory export and the Last Sell / BDM master, process,
-preview, and download the finished three-sheet (Mississauga / Calgary / Surrey)
-workbook built to the business's golden specification.
+Upload the Materials inventory export and the Last Sell / BDM master, optionally
+add the per-plant EWM stock exports to name the bin each batch is sitting in,
+then preview and download the finished three-sheet (Mississauga / Calgary /
+Surrey) workbook built to the business's golden specification.
 """
 from __future__ import annotations
 
@@ -13,11 +14,14 @@ import pandas as pd
 import streamlit as st
 
 from src.overstock_engine import (
+    EWM_PLANTS,
+    OUT_BIN,
     REGION_PLANTS,
     OverstockError,
     build_overstock,
     default_window,
     generate_excel,
+    load_ewm_bins,
     load_master,
     load_materials,
 )
@@ -38,6 +42,21 @@ with col_master:
     master_file = st.file_uploader(
         "2. Last Sell / BDM Material Master (.xlsx)", type=["xlsx"], key="ovs_master",
     )
+
+# Optional bins. One export per plant — 2925 and 2935 have none, so their rows
+# always come through with an empty Bin.
+st.markdown("**3. EWM stock exports — optional, one per plant**")
+st.caption(
+    "Adds the Bin column (which bin each batch is sitting in). Skip any you "
+    "don't have — the rest of the report is unaffected. Plants 2925 and 2935 "
+    "have no EWM export, so those rows never get a bin."
+)
+ewm_files = {}
+for col, plant in zip(st.columns(len(EWM_PLANTS)), EWM_PLANTS):
+    with col:
+        ewm_files[plant] = st.file_uploader(
+            f"EWM {plant} (.xlsx)", type=["xlsx"], key=f"ovs_ewm_{plant}",
+        )
 
 # Open date window — set both ends yourself. Defaults reproduce a same-day run
 # but the result depends only on the dates below, never on today's weekday.
@@ -70,19 +89,35 @@ if not st.button("Process files", type="primary"):
 
 
 @st.cache_data(show_spinner=False)
-def _process(mat_bytes: bytes, master_bytes: bytes, floor: date, cut: date):
+def _process(
+    mat_bytes: bytes,
+    master_bytes: bytes,
+    floor: date,
+    cut: date,
+    ewm_bytes: tuple[tuple[str, bytes], ...],
+):
     materials = load_materials(io.BytesIO(mat_bytes))
     master = load_master(io.BytesIO(master_bytes))
+    bins = {
+        plant: load_ewm_bins(io.BytesIO(raw), expected_plant=plant)
+        for plant, raw in ewm_bytes
+    }
     sheets = build_overstock(
-        materials, master, sled_floor=floor, last_sell_cutoff=cut,
+        materials, master, sled_floor=floor, last_sell_cutoff=cut, ewm_bins=bins,
     )
     return sheets
 
+
+# Tuple of pairs so the cache key covers exactly which plants were supplied.
+ewm_bytes = tuple(
+    (plant, f.getvalue()) for plant, f in ewm_files.items() if f is not None
+)
 
 with st.spinner("Matching inventory to the master and applying overstock rules..."):
     try:
         sheets = _process(
             materials_file.getvalue(), master_file.getvalue(), sled_floor, cutoff,
+            ewm_bytes,
         )
     except OverstockError as exc:
         st.error(str(exc))
@@ -99,6 +134,18 @@ if total_rows == 0:
 cols = st.columns(len(sheets))
 for col, (name, df) in zip(cols, sheets.items()):
     col.metric(f"{name} ({', '.join(REGION_PLANTS[name])})", f"{len(df):,} rows")
+
+if ewm_bytes:
+    # Unfilled bins are expected (2925/2935 have no export), so this is a
+    # coverage note rather than a warning — but a sudden drop means the EWM
+    # extract is a different vintage than the Materials snapshot.
+    with_bin = sum(df[OUT_BIN].notna().sum() for df in sheets.values())
+    supplied = ", ".join(p for p, _ in ewm_bytes)
+    st.caption(
+        f"Bins from EWM {supplied}: **{with_bin:,} of {total_rows:,}** rows "
+        "matched. Rows with no bin are left blank — plants without an EWM "
+        "export (2925, 2935) never match."
+    )
 
 st.subheader("Preview")
 tabs = st.tabs(list(sheets.keys()))
