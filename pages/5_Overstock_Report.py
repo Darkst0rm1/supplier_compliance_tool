@@ -15,6 +15,7 @@ import streamlit as st
 
 from src.overstock_engine import (
     EWM_PLANTS,
+    NO_LOOKUP_MARKER,
     OUT_BIN,
     REGION_PLANTS,
     OverstockError,
@@ -48,8 +49,10 @@ with col_master:
 st.markdown("**3. EWM stock exports — optional, one per plant**")
 st.caption(
     "Adds the Bin column (which bin each batch is sitting in). Skip any you "
-    "don't have — the rest of the report is unaffected. Plants 2925 and 2935 "
-    "have no EWM export, so those rows never get a bin."
+    "don't have — the rest of the report is unaffected. A blank Bin means that "
+    "plant's export was searched and the batch wasn't in it; **#N/A** means "
+    "there was nothing to search — always so for plants 2925 and 2935, which "
+    "have no EWM export, and for any plant you skip below."
 )
 ewm_files = {}
 for col, plant in zip(st.columns(len(EWM_PLANTS)), EWM_PLANTS):
@@ -139,12 +142,17 @@ if ewm_bytes:
     # Unfilled bins are expected (2925/2935 have no export), so this is a
     # coverage note rather than a warning — but a sudden drop means the EWM
     # extract is a different vintage than the Materials snapshot.
-    with_bin = sum(df[OUT_BIN].notna().sum() for df in sheets.values())
+    def _counts(df: pd.DataFrame) -> tuple[int, int]:
+        bins = df[OUT_BIN]
+        no_lookup = (bins == NO_LOOKUP_MARKER).sum()
+        return int(bins.notna().sum() - no_lookup), int(no_lookup)
+
+    matched, no_lookup = (sum(c) for c in zip(*(_counts(d) for d in sheets.values())))
     supplied = ", ".join(p for p, _ in ewm_bytes)
     st.caption(
-        f"Bins from EWM {supplied}: **{with_bin:,} of {total_rows:,}** rows "
-        "matched. Rows with no bin are left blank — plants without an EWM "
-        "export (2925, 2935) never match."
+        f"Bins from EWM {supplied}: **{matched:,} of {total_rows:,}** rows "
+        f"matched, {total_rows - matched - no_lookup:,} searched with no hit "
+        f"(blank), {no_lookup:,} with no export to search ({NO_LOOKUP_MARKER})."
     )
 
 st.subheader("Preview")

@@ -57,6 +57,13 @@ snapshot, not a rule difference):
   2935 never get a bin** — there is no export for them.
 * The bins are a lookup only. They never add, drop, or reorder a row.
 
+An empty Bin and an ``#N/A`` Bin mean different things, and the distinction is
+the reader's only way to tell them apart:
+
+* **blank** — the plant's EWM export was searched and this batch wasn't in it.
+* **#N/A** — there was nothing to search. Always the case for 2925 / 2935, and
+  also for 2910 / 2920 / 2930 when that plant's export wasn't uploaded.
+
 The finished workbook carried the ``Materialbatch`` key twice (columns G and K)
 — residue of the manual VLOOKUP. Only the first is kept here; the second was
 redundant once the lookup moved into code.
@@ -173,8 +180,14 @@ SLED_FLOOR_OFFSET_DAYS = 6        # include SLED on/after report_date + 6
 LAST_SELL_CUTOFF_OFFSET_DAYS = 7  # include last-sell-by on/before report_date + 7
 
 # Plants with an EWM stock export. Region plants absent here (2925, 2935) have
-# no bin data at all and always come through with an empty Bin.
+# no bin data at all.
 EWM_PLANTS: list[str] = ["2910", "2920", "2930"]
+
+# Shown when there is no EWM export to look the row up in, so a reader can tell
+# "checked, this batch has no bin" (blank) from "no bin data exists for this
+# plant" (#N/A). openpyxl binds this string to a real Excel error value, which
+# is what the golden's VLOOKUP produced.
+NO_LOOKUP_MARKER = "#N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +352,8 @@ def build_overstock(
 
     ``ewm_bins`` maps a plant code to that plant's ``load_ewm_bins`` lookup. It
     only fills the Bin column — row selection is identical with or without it.
-    Plants with no entry get an empty Bin."""
+    Plants with no entry get ``#N/A``; plants with one get the bin, or blank
+    where the batch isn't in their export."""
     default_floor, default_cutoff = default_window(report_date)
     sled_floor = pd.Timestamp(sled_floor if sled_floor is not None else default_floor)
     last_sell_cutoff = pd.Timestamp(
@@ -399,8 +413,12 @@ def build_overstock(
             + sub[MAT_BATCH].fillna("").astype(str)
         )
 
+        # A plant with no lookup gets #N/A — nothing was checked. A plant with a
+        # lookup gets the bin, or blank when the batch simply isn't in it.
         join_key = _bin_key(sub[MAT_MATERIAL], sub[MAT_BATCH])
-        sub[OUT_BIN] = pd.Series([None] * len(sub), index=sub.index, dtype=object)
+        sub[OUT_BIN] = pd.Series(
+            [NO_LOOKUP_MARKER] * len(sub), index=sub.index, dtype=object
+        )
         for plant in plants:
             lut = ewm_bins.get(plant)
             if lut is None or lut.empty:

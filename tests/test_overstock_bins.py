@@ -25,6 +25,7 @@ from src.overstock_engine import (
     EWM_PRODUCT,
     MAT_BATCH,
     MAT_SLED,
+    NO_LOOKUP_MARKER,
     OUT_BIN,
     OUT_MATERIALBATCH,
     OverstockError,
@@ -168,12 +169,12 @@ def test_bin_is_filled_from_the_matching_plant_only():
         ewm_bins={"2910": load_ewm_bins(_ewm_book([("10026065", "B1", "WDA58D")]))},
     )
     assert sheets["Mississauga"][OUT_BIN].tolist() == ["WDA58D"]
-    assert sheets["Calgary"][OUT_BIN].isna().all()
+    assert sheets["Calgary"][OUT_BIN].tolist() == [NO_LOOKUP_MARKER]
 
 
-def test_plants_with_no_ewm_export_get_a_blank_bin():
-    """2925 and 2935 have no EWM extract at all — the business's workbook shows
-    #N/A there; we leave the cell empty."""
+def test_plants_with_no_ewm_export_keep_the_na_marker():
+    """2925 and 2935 have no EWM extract at all, so nothing was searched for
+    them. That must stay #N/A — blank would claim we looked and found no bin."""
     sheets = _build(
         [("10026065", "2920", "B1"), ("10026065", "2925", "B1")],
         ewm_bins={"2920": load_ewm_bins(_ewm_book([("10026065", "B1", "GA60E")]))},
@@ -181,7 +182,29 @@ def test_plants_with_no_ewm_export_get_a_blank_bin():
     calgary = sheets["Calgary"]
     by_plant = dict(zip(calgary["Plant"], calgary[OUT_BIN]))
     assert by_plant["2920"] == "GA60E"
-    assert pd.isna(by_plant["2925"])
+    assert by_plant["2925"] == NO_LOOKUP_MARKER
+
+
+def test_a_skipped_upload_leaves_that_plant_as_na_not_blank():
+    """Same rule for 2910/2920/2930 when the user doesn't upload that plant's
+    file — nothing was searched, so it is #N/A, not a blank."""
+    sheets = _build(
+        [("10026065", "2910", "B1"), ("10026065", "2920", "B1")],
+        ewm_bins={"2910": load_ewm_bins(_ewm_book([("10026065", "B1", "WDA58D")]))},
+    )
+    assert sheets["Mississauga"][OUT_BIN].tolist() == ["WDA58D"]
+    assert sheets["Calgary"][OUT_BIN].tolist() == [NO_LOOKUP_MARKER]
+
+
+def test_na_marker_is_written_as_a_real_excel_error():
+    """The golden's #N/A came from a VLOOKUP, i.e. a genuine error value.
+    openpyxl binds the string to data type 'e', so it renders identically."""
+    sheets = _build([("10026065", "2925", "B1")])
+    ws = openpyxl.load_workbook(io.BytesIO(generate_excel(sheets)))["Calgary"]
+    bin_col = [c.value for c in ws[1]].index(OUT_BIN) + 1
+    cell = ws.cell(row=2, column=bin_col)
+    assert cell.value == NO_LOOKUP_MARKER
+    assert cell.data_type == "e"
 
 
 def test_an_unmatched_batch_is_blank_not_dropped():
@@ -190,6 +213,7 @@ def test_an_unmatched_batch_is_blank_not_dropped():
         ewm_bins={"2910": load_ewm_bins(_ewm_book([("10026065", "OTHER", "WDA58D")]))},
     )
     assert len(sheets["Mississauga"]) == 1
+    # Searched and not found -> blank, which is NOT the same as #N/A.
     assert pd.isna(sheets["Mississauga"][OUT_BIN].iloc[0])
 
 
@@ -208,7 +232,7 @@ def test_bins_never_change_row_selection():
 def test_report_builds_with_no_ewm_files_at_all():
     sheets = _build([("10026065", "2910", "B1")])
     assert len(sheets["Mississauga"]) == 1
-    assert sheets["Mississauga"][OUT_BIN].isna().all()
+    assert (sheets["Mississauga"][OUT_BIN] == NO_LOOKUP_MARKER).all()
 
 
 # ---------------------------------------------------------------------------
