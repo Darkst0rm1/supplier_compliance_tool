@@ -29,8 +29,29 @@ There is **no** storage-location restriction and **no** last-sell-date filter
 (the SLED cutoff alone defines the window). Rows are sorted by Shelf Life
 Expiration Date ascending within each sheet.
 
+Storage bins (optional third input)
+-----------------------------------
+Mirrors the Overstock report. An **EWM dispose export** may be supplied per
+plant (2910 / 2920 / 2930) — ``Mo - EWM 29xx dispose.xlsx``. It carries one row
+per Product / Batch / Storage Bin and names the bin each expiring batch is
+sitting in, replacing a manual ``VLOOKUP(Material&Batch, EWM!I:J, 2, 0)``.
+
+* The key is ``Material`` & ``Batch`` concatenated with no separator.
+* EWM repeats a Product/Batch across many bins; the VLOOKUP returned the
+  **first** match in file order, so the lookup keeps first and file order is
+  load-bearing.
+* An empty Bin and an ``#N/A`` Bin mean different things: **blank** = that
+  plant's export was searched and this batch wasn't in it; **#N/A** = there was
+  nothing to search. #N/A is always the case for plants 2925 / 2935, which have
+  no export, and for any of 2910 / 2920 / 2930 whose file wasn't uploaded.
+* The bins are a lookup only. They never add, drop, or reorder a row.
+
+Bins are optional: with no EWM file the list is built exactly as before.
+
 This module is intentionally self-contained (it does not import the overstock
-engine) — every engine in this app stands alone to keep imports simple.
+engine) — every engine in this app stands alone to keep imports simple. The bin
+helpers below are therefore duplicated from ``overstock_engine`` rather than
+shared; importing across engines once deadlocked on Streamlit Cloud.
 """
 from __future__ import annotations
 
@@ -71,11 +92,19 @@ MASTER_PRODUCT   = "Product Number"
 MASTER_BDM_NAME  = "Brand Manager Name"
 MASTER_LAST_SELL = "Last Sell Day"
 
+# EWM dispose export (one row per Product / Batch / Storage Bin).
+EWM_PRODUCT = "Product"
+EWM_BATCH   = "Batch"
+EWM_BIN     = "Storage Bin"
+EWM_OWNER   = "Party Entitled to Dispose"   # "BP2910" — lets a file name its plant
+
 # Output columns. NOTE: this report uses "Last sell day" / "Last sell date"
 # (without the "by" the overstock report uses).
 OUT_BDM           = "BDM"
 OUT_LAST_SELL_DAY = "Last sell day"
 OUT_LAST_SELL_DT  = "Last sell date"
+OUT_MATERIALBATCH = "Materialbatch"
+OUT_BIN           = "Bin"
 
 OUTPUT_COLUMNS = [
     MAT_MATERIAL,
@@ -84,6 +113,8 @@ OUTPUT_COLUMNS = [
     MAT_PLANT_NAME,
     OUT_BDM,
     MAT_STORAGE_LOC,
+    OUT_MATERIALBATCH,
+    OUT_BIN,
     MAT_STORAGE_DESC,
     MAT_BATCH,
     MAT_SLED,
@@ -114,6 +145,16 @@ RANA_EXCLUDED_BDM = "SANDRA GAGANIARAS GB"  # her RANA retail line is dropped
 # Date window: stock is in scope when its Shelf Life Expiration Date is
 # on/before report_date + this many days.
 SLED_CUTOFF_OFFSET_DAYS = 4
+
+# Plants with an EWM dispose export. Region plants absent here (2925, 2935) have
+# no bin data at all.
+EWM_PLANTS: list[str] = ["2910", "2920", "2930"]
+
+# Shown when there is no EWM export to look the row up in, so a reader can tell
+# "checked, this batch has no bin" (blank) from "no bin data exists for this
+# plant" (#N/A). openpyxl binds this string to a real Excel error value, which
+# is what the manual VLOOKUP produced.
+NO_LOOKUP_MARKER = "#N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +217,69 @@ def load_master(file_obj: Any) -> pd.DataFrame:
     return df[[MASTER_PRODUCT, MASTER_BDM_NAME, MASTER_LAST_SELL]].reset_index(drop=True)
 
 
+def _clean_text(s: pd.Series) -> pd.Series:
+    r"""Blank-safe text: NA becomes "", float artifacts are dropped, and padding
+    is trimmed.
+
+    ``.str.strip()`` rather than a ``\s+`` regex on purpose. Batches carry
+    **non-breaking** space padding — ``load_materials`` preserves it
+    deliberately — and pandas runs ``.str.replace(regex=True)`` on PyArrow's
+    RE2 engine, whose ``\s`` is ASCII-only and leaves U+00A0 in place.
+    ``str.strip`` is Unicode-aware. Likewise ``fillna`` rather than
+    ``astype(str)``: the latter leaves NA as NA on the string dtype, so a
+    "nan" -> "" mapping silently misses it.
+    """
+    return (
+        s.fillna("")
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.strip()
+        .replace({"nan": "", "None": "", "NaT": ""})
+    )
+
+
+def _bin_key(material: pd.Series, batch: pd.Series) -> pd.Series:
+    """Material & Batch, trimmed on both sides — the join key. Batches arrive
+    padded inconsistently between the two exports, so the key strips while the
+    displayed Materialbatch keeps whatever padding it came with."""
+    return _clean_text(material) + _clean_text(batch)
+
+
+def load_ewm_bins(file_obj: Any, expected_plant: str | None = None) -> pd.Series:
+    """Read one plant's EWM dispose export and reduce it to a
+    ``Material+Batch -> Storage Bin`` lookup.
+
+    EWM lists a Product/Batch once per bin it occupies; the manual VLOOKUP took
+    the first hit, so this keeps the first row in file order. Pass
+    ``expected_plant`` to reject a file uploaded into the wrong plant's box —
+    each export names its own plant in ``Party Entitled to Dispose`` ("BP2910").
+    """
+    df = _read_excel_str(file_obj)
+    _require(df, [EWM_PRODUCT, EWM_BATCH, EWM_BIN],
+             f"EWM dispose ({expected_plant})" if expected_plant else "EWM dispose")
+
+    if expected_plant and EWM_OWNER in df.columns:
+        owners = (
+            df[EWM_OWNER].dropna().astype(str).str.strip()
+            .str.upper().str.removeprefix("BP")
+        )
+        found = sorted({o for o in owners if o})
+        if found and expected_plant not in found:
+            raise DonateDisposeError(
+                f"This file is the plant {', '.join(found)} EWM dispose export, "
+                f"but it was uploaded in the {expected_plant} box. Swap the "
+                "files and try again."
+            )
+
+    keys = _bin_key(df[EWM_PRODUCT], df[EWM_BATCH])
+    bins = _clean_text(df[EWM_BIN])
+
+    lut = pd.DataFrame({"key": keys, "bin": bins})
+    lut = lut[(lut["key"] != "") & (lut["bin"] != "")]
+    lut = lut.drop_duplicates(subset="key", keep="first")   # VLOOKUP first match
+    return lut.set_index("key")["bin"]
+
+
 # ---------------------------------------------------------------------------
 # Core build
 # ---------------------------------------------------------------------------
@@ -198,13 +302,19 @@ def build_donate_dispose(
     master: pd.DataFrame,
     sled_cutoff: date | datetime | None = None,
     report_date: date | datetime | None = None,
+    ewm_bins: dict[str, pd.Series] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Apply the donate/dispose selection rules and return one DataFrame per
     region in finished-workbook column order.
 
     Pass ``sled_cutoff`` (include Shelf Life Expiration on/before) explicitly;
     left as ``None`` it falls back to report_date + ``SLED_CUTOFF_OFFSET_DAYS``
-    (today if ``report_date`` is also ``None``)."""
+    (today if ``report_date`` is also ``None``).
+
+    ``ewm_bins`` maps a plant code to that plant's ``load_ewm_bins`` lookup. It
+    only fills the Bin column — row selection is identical with or without it.
+    Plants with no entry get ``#N/A``; plants with one get the bin, or blank
+    where the batch isn't in their export."""
     cutoff = pd.Timestamp(
         sled_cutoff if sled_cutoff is not None else default_cutoff(report_date)
     )
@@ -237,12 +347,35 @@ def build_donate_dispose(
     )
     selected = m[keep].copy()
 
+    ewm_bins = ewm_bins or {}
+
     sheets: dict[str, pd.DataFrame] = {}
     for sheet_name, plants in REGION_PLANTS.items():
         sub = selected[selected[MAT_PLANT].isin(plants)].copy()
         sub = sub.sort_values(
             [MAT_SLED, MAT_MATERIAL, MAT_BATCH], kind="mergesort"
         ).reset_index(drop=True)
+
+        # Displayed key keeps the batch's own padding; the join key strips it.
+        # fillna before astype — on the string dtype astype(str) leaves NA as
+        # NA, which would turn the whole key blank for a batch-less row.
+        sub[OUT_MATERIALBATCH] = (
+            sub[MAT_MATERIAL].fillna("").astype(str)
+            + sub[MAT_BATCH].fillna("").astype(str)
+        )
+
+        # A plant with no lookup gets #N/A — nothing was checked. A plant with a
+        # lookup gets the bin, or blank when the batch simply isn't in it.
+        join_key = _bin_key(sub[MAT_MATERIAL], sub[MAT_BATCH])
+        sub[OUT_BIN] = pd.Series(
+            [NO_LOOKUP_MARKER] * len(sub), index=sub.index, dtype=object
+        )
+        for plant in plants:
+            lut = ewm_bins.get(plant)
+            if lut is None or lut.empty:
+                continue
+            at_plant = sub[MAT_PLANT] == plant
+            sub.loc[at_plant, OUT_BIN] = join_key[at_plant].map(lut)
 
         out = pd.DataFrame({col: sub.get(col) for col in OUTPUT_COLUMNS})
         out[MAT_SPECIAL_STOCK] = out[MAT_SPECIAL_STOCK].where(
@@ -268,6 +401,8 @@ _COL_WIDTHS = {
     MAT_PLANT_NAME: 16.0,
     OUT_BDM: 23.14,
     MAT_STORAGE_LOC: 18.57,
+    OUT_MATERIALBATCH: 13.0,
+    OUT_BIN: 20.0,
     MAT_STORAGE_DESC: 34.0,
     MAT_BATCH: 11.57,
     MAT_SLED: 27.43,
@@ -279,7 +414,9 @@ _COL_WIDTHS = {
     MAT_BLOCKED: 15.71,
 }
 
-_TEXT_OUT_COLS = set(MAT_TEXT_COLS)
+# Materialbatch is written as text so long numeric-looking keys aren't mangled
+# into floats. Bin is left General, matching the manual workbook.
+_TEXT_OUT_COLS = set(MAT_TEXT_COLS) | {OUT_MATERIALBATCH}
 
 
 def _write_sheet(ws, df: pd.DataFrame) -> None:
