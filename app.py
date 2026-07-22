@@ -27,8 +27,8 @@ pg = st.navigation([
         title="Overstock Report Dashboard",
     ),
     st.Page(
-        "pages/6_Donate_Dispose_List.py",
-        title="Donate / Dispose List Dashboard",
+        "pages/6_Dispose_List_EWM.py",
+        title="Dispose List (EWM)",
     ),
     st.Page(
         "pages/7_Risky_Inventory.py",
