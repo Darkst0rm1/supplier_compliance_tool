@@ -1,7 +1,17 @@
-pandas>=2.0
-openpyxl>=3.1
-streamlit>=1.30
-plotly>=5.0
-psycopg[binary]>=3.1
-anthropic>=0.40
-pydantic>=2.0
+# Pinned deliberately. This app is rebuilt from scratch on every Streamlit Cloud
+# reboot, so unpinned ranges let upstream releases break a deployment whose own
+# code has not changed. See the starlette note below for the failure this prevents.
+pandas==3.0.5
+openpyxl==3.1.5
+streamlit==1.61.0
+plotly==6.9.0
+psycopg[binary]==3.3.4
+anthropic==0.120.2
+pydantic==2.13.4
+
+# Streamlit's Starlette server subclasses starlette's GZipResponder but never
+# passes `thread_minimum_size`, which starlette 1.4.0 made a required kwarg.
+# Under starlette 1.4.0 every request raises TypeError and the app 500s on its
+# health checks ("Error running app"). streamlit only declares starlette>=0.40.0,
+# so the upper bound has to live here. Revisit once streamlit fixes the subclass.
+starlette<1.4.0
