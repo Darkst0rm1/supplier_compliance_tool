@@ -29,6 +29,8 @@ _STRING_COLS = [
     "PO Status",
     "Inbound Delivery",
     "Inbound Delivery Status",
+    "BDM",
+    "BDM Description",
 ]
 _DATE_COLS = ["Appointment Date", "Delivery Date"]
 
@@ -101,10 +103,13 @@ def describe_missing_optionals(df: pd.DataFrame) -> list[str]:
     """Return a list of canonical columns that loaded entirely blank.
 
     Useful for surfacing soft warnings in the UI (e.g. "Warehouse column was
-    empty in this export — Warehouse Summary will be empty").
+    empty in this export — Warehouse Summary will be empty"). BDM is included
+    because not every SAP export vintage carries it -- when it's absent the
+    Supplier Summary sheet's BDM column is simply blank, not wrong, but it's
+    worth telling the user why.
     """
     notes: list[str] = []
-    for col in ("Vendor Number", "Warehouse"):
+    for col in ("Vendor Number", "Warehouse", "BDM"):
         if col in df.columns and (df[col].astype(str).str.strip() == "").all():
             notes.append(col)
     return notes

@@ -86,6 +86,26 @@ def _apply_series(series: pd.Series, func, dtype=object) -> pd.Series:
     return series.apply(func)
 
 
+def _first_nonblank(series: pd.Series) -> str:
+    """First non-blank value in `series` as a stripped string, else "".
+
+    A vendor's rows can carry a blank BDM on some POs and a real one on
+    others (data-entry gaps in the source SAP export) -- taking the first
+    *answered* value rather than strictly the first row avoids letting a
+    blank row hide a value recorded elsewhere (mirrors
+    `receiving_importer.build_po_lookup`'s `_first_answer`).
+    """
+    for v in series:
+        if v is None:
+            continue
+        if isinstance(v, float) and pd.isna(v):
+            continue
+        s = str(v).strip()
+        if s and s.lower() != "nan":
+            return s
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -114,6 +134,11 @@ def build_report(
     portal file presence, so the audited number keeps the meaning it has always
     had. An exempt supplier is still reported on for accuracy -- being excused
     from uploading says nothing about whether their batch codes are correct.
+
+    BDM / BDM Description on the Supplier Summary sheet come from the SAP
+    export itself (`sap_importer` guarantees the columns exist, blank if the
+    export didn't carry them) -- not every SAP vintage includes them, so a
+    blank BDM column simply means this month's export didn't have the data.
     """
     exceptions = exceptions or {}
     tracker_names = tracker_names or set()
@@ -382,6 +407,7 @@ def build_report(
         "Closed POs Review": _review_columns(closed),
         "Processing POs Review": _review_columns(processing),
         "Supplier Summary": _supplier_summary(sap_unique, has_receiving),
+        "Supplier Price Summary": _supplier_price_summary(sap_unique, missing),
         "Should Have Uploaded": _should_have_uploaded(sap_unique),
         "Exempt But Submitting": _exempt_but_submitting(sap_unique),
         "Warehouse Summary": _warehouse_summary(sap_unique, has_receiving),
@@ -625,20 +651,30 @@ def _billback_supplier_tab(rows: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([tab, pd.DataFrame([total])], ignore_index=True)
 
 
-def _billback_sheets(missing: pd.DataFrame) -> dict:
-    """Build {sheet_name: tab} for every supplier with never-uploaded POs.
+def _billable_missing(missing: pd.DataFrame) -> pd.DataFrame:
+    """Rows in `missing` that are actually billed.
 
     Only rows whose portal file was never submitted are billed; rows with an
-    Invalid (rejected) upload are excluded. Suppliers are ordered by occurrence
-    count descending so the biggest offenders' tabs come first.
+    Invalid (rejected) upload are excluded -- the supplier attempted. Shared by
+    the per-supplier BB- tabs and the Supplier Price Summary sheet so both
+    report the same charge for the same PO.
     """
     if missing is None or missing.empty:
-        return {}
+        return missing if missing is not None else pd.DataFrame()
 
     billable = missing
     if "Portal Invalid Match" in billable.columns:
         billable = billable[~billable["Portal Invalid Match"].fillna(False)]
-    billable = billable.copy()
+    return billable.copy()
+
+
+def _billback_sheets(missing: pd.DataFrame) -> dict:
+    """Build {sheet_name: tab} for every supplier with never-uploaded POs.
+
+    Suppliers are ordered by occurrence count descending so the biggest
+    offenders' tabs come first.
+    """
+    billable = _billable_missing(missing)
     if billable.empty:
         return {}
 
@@ -919,7 +955,8 @@ def _accuracy_rollup(g: pd.DataFrame) -> dict:
 
 
 def _supplier_summary(
-    sap_unique: pd.DataFrame, include_receiving: bool = False
+    sap_unique: pd.DataFrame,
+    include_receiving: bool = False,
 ) -> pd.DataFrame:
     rows = []
     for (vendor_num, vendor_name), g in sap_unique.groupby(
@@ -943,9 +980,15 @@ def _supplier_summary(
             else EXCEPTION_STATUS_EXPECTED
         )
         pct = (found / with_inbound) if with_inbound else 0.0
+        bdm = _first_nonblank(g["BDM"]) if "BDM" in g.columns else ""
+        bdm_description = (
+            _first_nonblank(g["BDM Description"]) if "BDM Description" in g.columns else ""
+        )
         row = {
             "Vendor Number": vendor_num,
             "Vendor Name": vendor_name,
+            "BDM": bdm,
+            "BDM Description": bdm_description,
             "Exception Status": status,
             "Total SAP POs": total,
             "SAP POs With Inbound Delivery": with_inbound,
@@ -961,6 +1004,65 @@ def _supplier_summary(
             row.update(_accuracy_rollup(g))
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _supplier_price_summary(sap_unique: pd.DataFrame, missing: pd.DataFrame) -> pd.DataFrame:
+    """One row per vendor in scope this month: bill-back charge and exempt flag.
+
+    "Price" is the same $-per-occurrence bill-back charge already itemized on
+    the BB- tabs (see `_billable_missing`), rolled up per vendor -- $0 for
+    fully compliant vendors -- so the whole roster is visible in one sheet
+    instead of one tab per charged supplier. Exempt is a Yes/No collapse of
+    Exception Status: only an approved exception reads "Yes"; "Not on tracker"
+    is still expected to upload, so it reads "No".
+
+    Exceptions are informational only (see `build_report`), so an exempt
+    vendor can still show a non-zero Price here -- that combination is a
+    useful signal to review, not a bug.
+    """
+    columns = [
+        "Vendor Number", "Vendor Name", "Exempt",
+        "Missing Documents Billed", "Price (USD)",
+    ]
+    if sap_unique.empty:
+        return pd.DataFrame(columns=columns)
+
+    billable = _billable_missing(missing)
+    if billable.empty:
+        billed_counts: dict = {}
+    else:
+        billed_counts = (
+            billable.groupby(["Vendor Number", "Vendor Name"], dropna=False)[
+                "Normalized PO Number"
+            ]
+            .nunique()
+            .to_dict()
+        )
+
+    rows = []
+    for (vendor_num, vendor_name), g in sap_unique.groupby(
+        ["Vendor Number", "Vendor Name"], dropna=False
+    ):
+        status = (
+            g["Exception Status"].iloc[0]
+            if "Exception Status" in g.columns and len(g)
+            else EXCEPTION_STATUS_EXPECTED
+        )
+        billed = int(billed_counts.get((vendor_num, vendor_name), 0))
+        rows.append({
+            "Vendor Number": vendor_num,
+            "Vendor Name": vendor_name,
+            "Exempt": "Yes" if status == EXCEPTION_STATUS_EXCEPTION else "No",
+            "Missing Documents Billed": billed,
+            "Price (USD)": billed * BILLBACK_FEE_PER_OCCURRENCE,
+        })
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Price (USD)", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def _warehouse_summary(

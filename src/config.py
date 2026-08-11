@@ -13,6 +13,8 @@ SAP_CANONICAL_COLUMNS = [
     "Delivery Date",
     "Inbound Delivery",
     "Inbound Delivery Status",
+    "BDM",
+    "BDM Description",
 ]
 
 # Only these two are *strictly* required for the tool to function. Everything
