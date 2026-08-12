@@ -22,6 +22,9 @@ from src.dispose_ewm_engine import (
     EWM_BIN,
     EWM_OWNER,
     EWM_PRODUCT,
+    MATDISP_MATERIAL,
+    MATDISP_PLANT,
+    MATERIALS_PLANTS,
     OUT_BDM,
     PLANTS,
     DisposeEwmError,
@@ -29,6 +32,7 @@ from src.dispose_ewm_engine import (
     generate_excel,
     load_ewm,
     load_master,
+    load_materials_dispose,
 )
 
 # A trimmed but faithful column set: the real export has 54, and the engine
@@ -69,6 +73,40 @@ def _master_book(rows):
     ws.append(["Plant", "Product Number", "Brand Manager Name", "Last Sell Day"])
     for product, bdm in rows:
         ws.append(["2910", product, bdm, 30])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+MATDISP_HEADERS = [
+    "Material", "Material Description", "Plant", "Plant Name", "BDM",
+    "Storage Location", "Description of Storage Location", "Batch",
+    "Shelf Life Expiration Date", "Last sell day", "Last sell date",
+    "Special Stock Type Description", "Unrestricted Stock",
+    "Stock in Quality Inspection", "Blocked Stock",
+]
+
+
+def _materials_dispose_book(rows):
+    """The 2925/2935 materials-based dispose export as bytes. ``rows`` are
+    (material, plant, unrestricted_stock) tuples or full dicts keyed by
+    header."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(MATDISP_HEADERS)
+    for row in rows:
+        data = {h: None for h in MATDISP_HEADERS}
+        if isinstance(row, dict):
+            data.update(row)
+        else:
+            material, plant, unrestricted = row
+            data.update({
+                "Material": material, "Plant": plant,
+                "Unrestricted Stock": unrestricted,
+                "Stock in Quality Inspection": 0, "Blocked Stock": 0,
+            })
+        ws.append([data[h] for h in MATDISP_HEADERS])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -232,3 +270,66 @@ def test_autofilter_covers_every_column():
     )["2910"]
     last = openpyxl.utils.get_column_letter(len(EWM_HEADERS) + 1)
     assert ws.auto_filter.ref == f"A1:{last}2"
+
+
+# ---------------------------------------------------------------------------
+# Materials-based dispose export — plants 2925 / 2935 (no EWM system)
+# ---------------------------------------------------------------------------
+def test_materials_dispose_splits_into_two_sheets_by_plant():
+    md = load_materials_dispose(_materials_dispose_book([
+        ("10076882", "2925", 28), ("10015386", "2935", 5),
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+    assert sheets["2935"][MATDISP_MATERIAL].tolist() == ["10015386"]
+
+
+def test_materials_dispose_both_plants_get_a_sheet_even_if_one_is_empty():
+    md = load_materials_dispose(_materials_dispose_book([("10076882", "2925", 28)]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert list(sheets) == MATERIALS_PLANTS
+    assert sheets["2935"].empty
+
+
+def test_materials_dispose_packaging_exclusion_applies():
+    md = load_materials_dispose(_materials_dispose_book([
+        ("10076882", "2925", 28), ("40048660", "2925", 5),
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+
+
+def test_materials_dispose_bdm_already_present_is_kept_as_is():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925", "BDM": "AMOL PRAKASH",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0,
+         "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert sheets["2925"][OUT_BDM].tolist() == ["AMOL PRAKASH"]
+
+
+def test_materials_dispose_alone_is_enough_to_build():
+    md = load_materials_dispose(_materials_dispose_book([("10076882", "2925", 28)]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+
+
+def test_ewm_and_materials_dispose_sheets_combine_in_plant_order():
+    ewm = {p: load_ewm(_ewm_book([("10026065", "B1", "X")], owner=f"BP{p}"),
+                       expected_plant=p) for p in PLANTS}
+    md = load_materials_dispose(
+        _materials_dispose_book([("10076882", "2925", 28), ("10015386", "2935", 5)])
+    )
+    sheets = build_dispose_ewm(ewm, materials_dispose=md)
+    assert list(sheets) == PLANTS + MATERIALS_PLANTS
+
+
+def test_a_non_materials_dispose_file_is_rejected_by_name():
+    wb = openpyxl.Workbook()
+    wb.active.append(["Something", "Else"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    with pytest.raises(DisposeEwmError, match="Materials dispose"):
+        load_materials_dispose(buf)

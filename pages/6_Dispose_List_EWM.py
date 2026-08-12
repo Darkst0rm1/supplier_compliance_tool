@@ -2,7 +2,8 @@
 
 Upload the per-plant EWM dispose exports and the Last Sell / BDM master,
 process, preview, and download the finished workbook (one sheet per plant:
-2910, 2920, 2930) built to the business's golden specification.
+2910, 2920, 2930, plus 2925/2935 if that materials export is supplied) built
+to the business's golden specification.
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import streamlit as st
 
 from src.dispose_ewm_engine import (
     EXCLUDED_PRODUCT_PREFIXES,
+    MATERIALS_PLANTS,
     OUT_BDM,
     PLANTS,
     DisposeEwmError,
@@ -20,6 +22,7 @@ from src.dispose_ewm_engine import (
     generate_excel,
     load_ewm,
     load_master,
+    load_materials_dispose,
 )
 
 st.title("Dispose List (EWM)")
@@ -27,7 +30,8 @@ st.caption(
     "Upload the per-plant EWM dispose exports and the Last Sell / BDM material "
     "master. The export is kept as-is — every column, original row order — with "
     "the Brand Manager added and packaging materials removed. One sheet per "
-    "plant: 2910, 2920, 2930."
+    "plant: 2910, 2920, 2930, plus 2925 and 2935 if that materials export is "
+    "supplied."
 )
 
 st.markdown("**1. EWM dispose exports — one per plant**")
@@ -45,17 +49,28 @@ master_file = st.file_uploader(
     help="Used only to look up the Brand Manager for each product.",
 )
 
+st.markdown(f"**3. Materials dispose export — {' / '.join(MATERIALS_PLANTS)} (optional)**")
+materials_file = st.file_uploader(
+    "Materials dispose export (.xlsx)", type=["xlsx"], key="dewm_materials",
+    help=(
+        f"Plants {' and '.join(MATERIALS_PLANTS)} have no EWM system, so they "
+        "never get an EWM export. Upload the Materials-based dispose extract "
+        "instead — same shape the Donate/Dispose report produces, BDM already "
+        "filled in. One file can carry both plants; it's split into two sheets."
+    ),
+)
+
 st.caption(
-    "Rows whose Product number starts with "
+    "Rows whose Product/Material number starts with "
     f"{' or '.join(EXCLUDED_PRODUCT_PREFIXES)} are excluded — packaging, "
     "display, label and sample material, never sellable stock."
 )
 
 supplied = {p: f for p, f in ewm_files.items() if f is not None}
-if not supplied or master_file is None:
+if (not supplied or master_file is None) and materials_file is None:
     st.info(
-        "Upload at least one EWM dispose export and the material master to "
-        "generate the list."
+        "Upload at least one EWM dispose export and the material master, or "
+        "the 2925/2935 materials dispose export, to generate the list."
     )
     st.stop()
 
@@ -64,19 +79,32 @@ if not st.button("Process files", type="primary"):
 
 
 @st.cache_data(show_spinner=False)
-def _process(ewm_bytes: tuple[tuple[str, bytes], ...], master_bytes: bytes):
+def _process(
+    ewm_bytes: tuple[tuple[str, bytes], ...],
+    master_bytes: bytes | None,
+    materials_bytes: bytes | None,
+):
     ewm = {
         plant: load_ewm(io.BytesIO(raw), expected_plant=plant)
         for plant, raw in ewm_bytes
     }
-    return build_dispose_ewm(ewm, load_master(io.BytesIO(master_bytes)))
+    bdm_lut = load_master(io.BytesIO(master_bytes)) if master_bytes else None
+    materials_dispose = (
+        load_materials_dispose(io.BytesIO(materials_bytes))
+        if materials_bytes else None
+    )
+    return build_dispose_ewm(ewm, bdm_lut, materials_dispose)
 
 
 ewm_bytes = tuple((p, f.getvalue()) for p, f in supplied.items())
 
 with st.spinner("Applying the packaging exclusion and looking up brand managers..."):
     try:
-        sheets = _process(ewm_bytes, master_file.getvalue())
+        sheets = _process(
+            ewm_bytes,
+            master_file.getvalue() if master_file else None,
+            materials_file.getvalue() if materials_file else None,
+        )
     except DisposeEwmError as exc:
         st.error(str(exc))
         st.stop()

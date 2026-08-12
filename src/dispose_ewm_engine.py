@@ -10,10 +10,16 @@ Inputs:
   ``Mo - EWM 2910 dispose.xlsx``. Each carries one row per Storage Bin /
   Product / Batch with 54 columns of warehouse detail.
 * **Last Sell / BDM Material Master** — used only to look up the Brand Manager.
+* **Materials-based dispose export**, optional, for plants 2925 and 2935 —
+  which have no EWM system and so can never produce an EWM export. Same
+  15-column shape ``donate_dispose_engine`` outputs; BDM is already populated
+  in it, so it needs no master lookup here. One file can carry both plants,
+  split by its ``Plant`` column into two sheets.
 
 The output is the EWM export itself with a single column added: ``BDM``, placed
-straight after ``Batch``. Sheets are named by plant code, matching the supplied
-finished workbook ``Dispose list 0722 EWM (1).xlsx``.
+straight after ``Batch``, plus one sheet per materials-based plant supplied.
+Sheets are named by plant code, matching the supplied finished workbook
+``Dispose list 0722 EWM (1).xlsx``.
 
 Selection rule
 --------------
@@ -78,6 +84,20 @@ EWM_OWNER   = "Party Entitled to Dispose"   # "BP2910" — lets a file name its 
 MASTER_PRODUCT  = "Product Number"
 MASTER_BDM_NAME = "Brand Manager Name"
 
+# Source columns for the Materials-based dispose export — used for plants 2925
+# and 2935, which have no EWM system of their own and so can never produce an
+# EWM dispose export. Same 15-column shape the Donate/Dispose engine outputs
+# (see ``donate_dispose_engine.OUTPUT_COLUMNS``), because that is where this
+# extract comes from: someone runs that report filtered to 2925/2935 and it is
+# handed to this tool as-is, BDM already looked up.
+MATDISP_MATERIAL      = "Material"
+MATDISP_PLANT         = "Plant"
+MATDISP_UNRESTRICTED  = "Unrestricted Stock"
+MATDISP_QUALITY       = "Stock in Quality Inspection"
+MATDISP_BLOCKED       = "Blocked Stock"
+MATDISP_STOCK_COLS = [MATDISP_UNRESTRICTED, MATDISP_QUALITY, MATDISP_BLOCKED]
+MATDISP_DATE_COLS = ["Shelf Life Expiration Date", "Last sell date"]
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -90,6 +110,9 @@ BDM_INSERT_AFTER = EWM_BATCH
 
 # Plants with an EWM dispose export, and the sheet order of the output.
 PLANTS: list[str] = ["2910", "2920", "2930"]
+
+# Plants sourced from the Materials-based export instead (no EWM system).
+MATERIALS_PLANTS: list[str] = ["2925", "2935"]
 
 # ---------------------------------------------------------------------------
 # Business-rule constants (auditable; change here, not in the UI)
@@ -106,6 +129,7 @@ DATE_COLS = [
     "Shelf Life Expiration Date",
     "Goods Receipt Date",
     "Latest Delivery Date",
+    "Last sell date",
 ]
 TIME_COLS = ["Goods Receipt Time"]
 INT_COLS = ["Quantity", "Packed Qty (AUoM)"]
@@ -187,6 +211,26 @@ def load_ewm(file_obj: Any, expected_plant: str | None = None) -> pd.DataFrame:
     return df
 
 
+def load_materials_dispose(file_obj: Any) -> pd.DataFrame:
+    """Read the Materials-based dispose export covering plants 2925 and 2935.
+
+    Unlike ``load_ewm`` this file already carries a populated ``BDM`` column
+    (it comes from a Donate/Dispose-style run already looked up against the
+    master), so no separate BDM lookup is needed here. One file can carry
+    rows for both plants; ``build_dispose_ewm`` splits it by ``Plant``.
+    """
+    df = _read_excel_str(file_obj)
+    _require(df, [MATDISP_MATERIAL, MATDISP_PLANT] + MATDISP_STOCK_COLS,
+             "Materials dispose (2925/2935)")
+
+    for c in MATDISP_DATE_COLS:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in MATDISP_STOCK_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
 def load_master(file_obj: Any) -> pd.Series:
     """Read the Last Sell / BDM master and reduce it to ``Product -> BDM``.
 
@@ -211,6 +255,7 @@ def load_master(file_obj: Any) -> pd.Series:
 def build_dispose_ewm(
     ewm_by_plant: dict[str, pd.DataFrame],
     bdm_lut: pd.Series | None = None,
+    materials_dispose: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Apply the packaging exclusion and add the BDM column.
 
@@ -218,9 +263,13 @@ def build_dispose_ewm(
     the plants supplied get a sheet. ``bdm_lut`` is ``load_master``'s
     ``Product -> BDM`` lookup; without it the BDM column is present but empty.
 
+    ``materials_dispose`` is ``load_materials_dispose``'s frame for plants 2925
+    and 2935 (no EWM system); it is split by ``Plant`` into one sheet each,
+    always both, even if a plant has no rows after exclusion.
+
     Row order is the export's own — the warehouse's ordering is meaningful and
     nothing here re-sorts it."""
-    if not ewm_by_plant:
+    if not ewm_by_plant and materials_dispose is None:
         raise DisposeEwmError(
             "Upload at least one EWM dispose export to build the list."
         )
@@ -242,6 +291,16 @@ def build_dispose_ewm(
         out.insert(out.columns.get_loc(BDM_INSERT_AFTER) + 1, OUT_BDM, bdm)
 
         sheets[plant] = out
+
+    if materials_dispose is not None:
+        md = materials_dispose.copy()
+        is_packaging = _clean_text(md[MATDISP_MATERIAL]).str.startswith(
+            EXCLUDED_PRODUCT_PREFIXES
+        )
+        md = md[~is_packaging].reset_index(drop=True)
+        plant_col = _clean_text(md[MATDISP_PLANT])
+        for plant in MATERIALS_PLANTS:
+            sheets[plant] = md[plant_col == plant].reset_index(drop=True)
 
     return sheets
 
@@ -278,6 +337,13 @@ _COL_WIDTHS = {
     "Consolidation Group": 21.0, "Serial No. Requiremt": 22.0,
     "Production Supply Area": 24.0, "Order Item Reduced": 20.0,
     "WIP Number": 12.0, "Latest Delivery Date": 22.0,
+    # Materials-dispose sheets (2925 / 2935) — headers unique to that shape.
+    "Material": 13.0, "Material Description": 36.0, "Plant": 6.14,
+    "Plant Name": 16.0, "Storage Location": 18.57,
+    "Description of Storage Location": 34.0, "Last sell day": 13.57,
+    "Last sell date": 14.57, "Special Stock Type Description": 33.29,
+    "Unrestricted Stock": 20.29, "Stock in Quality Inspection": 28.43,
+    "Blocked Stock": 15.71,
 }
 
 
