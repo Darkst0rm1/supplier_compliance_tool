@@ -70,16 +70,18 @@ column), the same way ``donate_dispose_engine`` computes
 those three values (the older, pre-filtered shape), the existing value wins —
 nothing here overwrites data that's already there.
 
-The user picks one date on the page. A row is kept only if **both** Shelf
-Life Expiration Date and Last sell date fall on/before that date +
-``SLED_CUTOFF_OFFSET_DAYS`` — the same grace window
-``donate_dispose_engine`` uses, applied here rather than left as a second
-user-tweakable field, per this app's rule that anything affecting what gets
-flagged is a hardcoded, auditable business rule, not a setting (see
-``HANDOVER.md`` §4). A row missing either date (no master supplied, product
-not in the master, or no SLED on the row) cannot be evaluated and is dropped.
-Rows with no cutoff supplied at all (``materials_cutoff=None``) are not
-date-filtered — only the packaging exclusion applies.
+The page shows two dates: a **report date** (also names the downloaded file)
+and a **cutoff date**, which defaults to report date +
+``SLED_CUTOFF_OFFSET_DAYS`` (``default_materials_cutoff``) but can be
+overridden independently — same two-field pattern ``overstock_engine``'s page
+uses for its date window. A row is kept only if **both** Shelf Life
+Expiration Date and Last sell date fall on/before the cutoff date exactly;
+``build_dispose_ewm`` does not add any further offset — the grace window is
+baked into the *default* shown on the page, not applied a second time
+underneath a user-supplied value. A row missing either date (no master
+supplied, product not in the master, or no SLED on the row) cannot be
+evaluated and is dropped. Pass ``materials_cutoff=None`` to skip date
+filtering entirely — only the packaging exclusion applies.
 """
 from __future__ import annotations
 
@@ -302,6 +304,21 @@ def load_master(file_obj: Any) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Core build
 # ---------------------------------------------------------------------------
+def _coerce_report_date(report_date: date | datetime | None) -> date:
+    if report_date is None:
+        return date.today()
+    if isinstance(report_date, datetime):
+        return report_date.date()
+    return report_date
+
+
+def default_materials_cutoff(report_date: date | datetime | None = None) -> date:
+    """The default dispose cutoff for a report date — pre-fills the page's
+    cutoff field; the user can override it freely from there, same as
+    ``donate_dispose_engine.default_cutoff``."""
+    return _coerce_report_date(report_date) + timedelta(days=SLED_CUTOFF_OFFSET_DAYS)
+
+
 def build_dispose_ewm(
     ewm_by_plant: dict[str, pd.DataFrame],
     bdm_lut: pd.DataFrame | None = None,
@@ -321,10 +338,11 @@ def build_dispose_ewm(
     Last sell day / Last sell date values on those rows are filled from
     ``bdm_lut``; existing values are kept as-is. If ``materials_cutoff`` is
     given, a materials-dispose row is kept only when both Shelf Life
-    Expiration Date and Last sell date fall on/before
-    ``materials_cutoff + SLED_CUTOFF_OFFSET_DAYS`` — rows missing either date
-    are dropped. Leave ``materials_cutoff`` as ``None`` to skip date filtering
-    entirely (only the packaging exclusion applies).
+    Expiration Date and Last sell date fall on/before ``materials_cutoff``
+    exactly (pass ``default_materials_cutoff(report_date)`` to reproduce the
+    usual +``SLED_CUTOFF_OFFSET_DAYS``-day grace window) — rows missing either
+    date are dropped. Leave ``materials_cutoff`` as ``None`` to skip date
+    filtering entirely (only the packaging exclusion applies).
 
     Row order is the export's own — the warehouse's ordering is meaningful and
     nothing here re-sorts it."""
@@ -382,9 +400,7 @@ def build_dispose_ewm(
         )
 
         if materials_cutoff is not None:
-            cutoff_ts = pd.Timestamp(materials_cutoff) + pd.Timedelta(
-                days=SLED_CUTOFF_OFFSET_DAYS
-            )
+            cutoff_ts = pd.Timestamp(materials_cutoff)
             keep = (
                 md[MATDISP_SLED].notna()
                 & md[MATDISP_LAST_SELL_DATE].notna()

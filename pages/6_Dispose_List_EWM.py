@@ -17,9 +17,9 @@ from src.dispose_ewm_engine import (
     MATERIALS_PLANTS,
     OUT_BDM,
     PLANTS,
-    SLED_CUTOFF_OFFSET_DAYS,
     DisposeEwmError,
     build_dispose_ewm,
+    default_materials_cutoff,
     generate_excel,
     load_ewm,
     load_master,
@@ -67,20 +67,37 @@ st.caption(
     "display, label and sample material, never sellable stock."
 )
 
-report_date = st.date_input(
-    "Report date",
-    value=date.today(),
-    help=(
-        "Defaults to today, but you can back- or forward-date this if you're "
-        "running the report on a different day than usual (e.g. not "
-        "Wednesday). Used two ways: it names the downloaded file, and — for "
-        "the 2925/2935 materials export — a row is kept only if both Shelf "
-        f"Life Expiration Date and Last sell date fall on/before this date + "
-        f"{SLED_CUTOFF_OFFSET_DAYS} days. Rows missing either date are "
-        "dropped; Last sell date is computed from the master's Last Sell Day "
-        "when the export doesn't already carry it."
-    ),
-)
+st.markdown("**Report date & cutoff**")
+col_report, col_cutoff = st.columns(2)
+with col_report:
+    report_date = st.date_input(
+        "Report date",
+        value=date.today(),
+        help=(
+            "Defaults to today, but you can back- or forward-date this if "
+            "you're running the report on a different day than usual (e.g. "
+            "not Wednesday). Names the downloaded file."
+        ),
+    )
+with col_cutoff:
+    cutoff_date = st.date_input(
+        "Cutoff date (2925/2935 only)",
+        value=default_materials_cutoff(report_date),
+        help=(
+            "Defaults to report date + a few days' grace window. A "
+            "2925/2935 row is kept only if both Shelf Life Expiration Date "
+            "and Last sell date fall on/before this date — override it "
+            "directly if the default grace window isn't what you want. Rows "
+            "missing either date are dropped; Last sell date is computed "
+            "from the master's Last Sell Day when the export doesn't "
+            "already carry it."
+        ),
+    )
+if cutoff_date < report_date:
+    st.warning(
+        "The cutoff date is before the report date — that usually keeps "
+        "nothing for 2925/2935. Double-check the two dates."
+    )
 if materials_file is not None and master_file is None:
     st.warning(
         "No material master uploaded — Last sell date can't be computed "
@@ -129,7 +146,7 @@ with st.spinner("Applying the packaging exclusion and looking up brand managers.
             ewm_bytes,
             master_file.getvalue() if master_file else None,
             materials_file.getvalue() if materials_file else None,
-            report_date,
+            cutoff_date,
         )
     except DisposeEwmError as exc:
         st.error(str(exc))
