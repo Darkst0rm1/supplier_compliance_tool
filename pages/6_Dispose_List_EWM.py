@@ -67,16 +67,18 @@ st.caption(
     "display, label and sample material, never sellable stock."
 )
 
-materials_cutoff = st.date_input(
-    "Dispose cutoff date (2925/2935 only)",
+report_date = st.date_input(
+    "Report date",
     value=date.today(),
     help=(
-        "A 2925/2935 row is kept only if both Shelf Life Expiration Date "
-        f"and Last sell date fall on/before this date + "
+        "Defaults to today, but you can back- or forward-date this if you're "
+        "running the report on a different day than usual (e.g. not "
+        "Wednesday). Used two ways: it names the downloaded file, and — for "
+        "the 2925/2935 materials export — a row is kept only if both Shelf "
+        f"Life Expiration Date and Last sell date fall on/before this date + "
         f"{SLED_CUTOFF_OFFSET_DAYS} days. Rows missing either date are "
-        "dropped. Last sell date is computed from the master's Last Sell "
-        "Day when the export doesn't already carry it. Only applies if you "
-        "upload the materials dispose export above."
+        "dropped; Last sell date is computed from the master's Last Sell Day "
+        "when the export doesn't already carry it."
     ),
 )
 if materials_file is not None and master_file is None:
@@ -127,7 +129,7 @@ with st.spinner("Applying the packaging exclusion and looking up brand managers.
             ewm_bytes,
             master_file.getvalue() if master_file else None,
             materials_file.getvalue() if materials_file else None,
-            materials_cutoff,
+            report_date,
         )
     except DisposeEwmError as exc:
         st.error(str(exc))
@@ -172,6 +174,6 @@ with st.spinner("Building workbook..."):
 st.download_button(
     "⬇️ Download Dispose_List_EWM.xlsx",
     data=xlsx,
-    file_name=f"Dispose list {date.today():%m%d} EWM.xlsx",
+    file_name=f"Dispose list {report_date:%m%d} EWM.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
