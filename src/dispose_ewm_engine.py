@@ -57,10 +57,34 @@ quantities are proportionally higher in the workbook than in the export.
 
 If the shipping-allocated rows should really be dropped, that is a genuine new
 rule — add it here deliberately rather than inferring it from one sheet.
+
+Materials-based dispose date filter (2925 / 2935 only)
+--------------------------------------------------------
+The materials-based export for 2925/2935 is a **raw** SAP Materials inventory
+extract (same shape ``overstock_engine``/``donate_dispose_engine`` read) — it
+carries Shelf Life Expiration Date but not a pre-computed BDM, Last Sell Day,
+or Last sell date. Those get filled in from the Last Sell / BDM master already
+uploaded for the EWM plants' BDM lookup (``load_master``, ``Last Sell Day``
+column), the same way ``donate_dispose_engine`` computes
+``Last sell date = SLED − Last Sell Day``. If the file already carries any of
+those three values (the older, pre-filtered shape), the existing value wins —
+nothing here overwrites data that's already there.
+
+The user picks one date on the page. A row is kept only if **both** Shelf
+Life Expiration Date and Last sell date fall on/before that date +
+``SLED_CUTOFF_OFFSET_DAYS`` — the same grace window
+``donate_dispose_engine`` uses, applied here rather than left as a second
+user-tweakable field, per this app's rule that anything affecting what gets
+flagged is a hardcoded, auditable business rule, not a setting (see
+``HANDOVER.md`` §4). A row missing either date (no master supplied, product
+not in the master, or no SLED on the row) cannot be evaluated and is dropped.
+Rows with no cutoff supplied at all (``materials_cutoff=None``) are not
+date-filtered — only the packaging exclusion applies.
 """
 from __future__ import annotations
 
 import io
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -81,8 +105,9 @@ EWM_BATCH   = "Batch"
 EWM_BIN     = "Storage Bin"
 EWM_OWNER   = "Party Entitled to Dispose"   # "BP2910" — lets a file name its plant
 
-MASTER_PRODUCT  = "Product Number"
-MASTER_BDM_NAME = "Brand Manager Name"
+MASTER_PRODUCT       = "Product Number"
+MASTER_BDM_NAME       = "Brand Manager Name"
+MASTER_LAST_SELL_DAY  = "Last Sell Day"
 
 # Source columns for the Materials-based dispose export — used for plants 2925
 # and 2935, which have no EWM system of their own and so can never produce an
@@ -90,13 +115,16 @@ MASTER_BDM_NAME = "Brand Manager Name"
 # (see ``donate_dispose_engine.OUTPUT_COLUMNS``), because that is where this
 # extract comes from: someone runs that report filtered to 2925/2935 and it is
 # handed to this tool as-is, BDM already looked up.
-MATDISP_MATERIAL      = "Material"
-MATDISP_PLANT         = "Plant"
-MATDISP_UNRESTRICTED  = "Unrestricted Stock"
-MATDISP_QUALITY       = "Stock in Quality Inspection"
-MATDISP_BLOCKED       = "Blocked Stock"
+MATDISP_MATERIAL        = "Material"
+MATDISP_PLANT            = "Plant"
+MATDISP_UNRESTRICTED     = "Unrestricted Stock"
+MATDISP_QUALITY          = "Stock in Quality Inspection"
+MATDISP_BLOCKED          = "Blocked Stock"
+MATDISP_SLED             = "Shelf Life Expiration Date"
+MATDISP_LAST_SELL_DAY    = "Last sell day"
+MATDISP_LAST_SELL_DATE   = "Last sell date"
 MATDISP_STOCK_COLS = [MATDISP_UNRESTRICTED, MATDISP_QUALITY, MATDISP_BLOCKED]
-MATDISP_DATE_COLS = ["Shelf Life Expiration Date", "Last sell date"]
+MATDISP_DATE_COLS = [MATDISP_SLED, MATDISP_LAST_SELL_DATE]
 
 # ---------------------------------------------------------------------------
 # Output
@@ -120,6 +148,12 @@ MATERIALS_PLANTS: list[str] = ["2925", "2935"]
 # A Product whose number starts with any of these is packaging / display /
 # promo material, never sellable stock — excluded entirely.
 EXCLUDED_PRODUCT_PREFIXES = ("40",)
+
+# Materials-based dispose date filter (2925/2935 only): a row is kept when
+# both Shelf Life Expiration Date and Last sell date fall on/before the
+# user-picked date plus this many days. Matches donate_dispose_engine's
+# SLED_CUTOFF_OFFSET_DAYS grace window.
+SLED_CUTOFF_OFFSET_DAYS = 4
 
 # ---------------------------------------------------------------------------
 # Column typing. Everything not listed stays text, so ids keep their leading
@@ -214,39 +248,55 @@ def load_ewm(file_obj: Any, expected_plant: str | None = None) -> pd.DataFrame:
 def load_materials_dispose(file_obj: Any) -> pd.DataFrame:
     """Read the Materials-based dispose export covering plants 2925 and 2935.
 
-    Unlike ``load_ewm`` this file already carries a populated ``BDM`` column
-    (it comes from a Donate/Dispose-style run already looked up against the
-    master), so no separate BDM lookup is needed here. One file can carry
-    rows for both plants; ``build_dispose_ewm`` splits it by ``Plant``.
+    Usually a **raw** SAP Materials inventory export — no BDM, Last sell day,
+    or Last sell date columns at all; ``build_dispose_ewm`` fills those in from
+    the Last Sell / BDM master. If the file already carries any of those three
+    (the older, pre-filtered shape produced by a Donate/Dispose-style run),
+    its values are kept as-is. One file can carry rows for both plants;
+    ``build_dispose_ewm`` splits it by ``Plant``.
     """
     df = _read_excel_str(file_obj)
     _require(df, [MATDISP_MATERIAL, MATDISP_PLANT] + MATDISP_STOCK_COLS,
              "Materials dispose (2925/2935)")
 
+    for c in (OUT_BDM, MATDISP_LAST_SELL_DAY, MATDISP_LAST_SELL_DATE):
+        if c not in df.columns:
+            df[c] = pd.NA
+
     for c in MATDISP_DATE_COLS:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    df[MATDISP_LAST_SELL_DAY] = pd.to_numeric(df[MATDISP_LAST_SELL_DAY], errors="coerce")
     for c in MATDISP_STOCK_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
 
-def load_master(file_obj: Any) -> pd.Series:
-    """Read the Last Sell / BDM master and reduce it to ``Product -> BDM``.
+def load_master(file_obj: Any) -> pd.DataFrame:
+    """Read the Last Sell / BDM master and reduce it to one row per product,
+    columns ``bdm`` and ``last_sell_day``.
 
-    The master repeats a product across vendors; the Brand Manager is the same
-    on each, so the first row wins."""
+    The master repeats a product across vendors; values are the same on each,
+    so the first row wins. ``last_sell_day`` is optional — if the master has
+    no ``Last Sell Day`` column the result is all-NaN, and the materials-based
+    2925/2935 rows that need it to compute Last sell date can't be dated."""
     df = _read_excel_str(file_obj)
     _require(df, [MASTER_PRODUCT, MASTER_BDM_NAME],
              "Last Sell / BDM Material Master")
 
+    last_sell_day = (
+        pd.to_numeric(df[MASTER_LAST_SELL_DAY], errors="coerce")
+        if MASTER_LAST_SELL_DAY in df.columns
+        else pd.Series(pd.NA, index=df.index)
+    )
+
     lut = pd.DataFrame({
         "product": _clean_text(df[MASTER_PRODUCT]),
         "bdm": _clean_text(df[MASTER_BDM_NAME]),
+        "last_sell_day": last_sell_day.to_numpy(),
     })
     lut = lut[lut["product"] != ""]
     lut = lut.drop_duplicates(subset="product", keep="first")
-    return lut.set_index("product")["bdm"]
+    return lut.set_index("product")[["bdm", "last_sell_day"]]
 
 
 # ---------------------------------------------------------------------------
@@ -254,18 +304,27 @@ def load_master(file_obj: Any) -> pd.Series:
 # ---------------------------------------------------------------------------
 def build_dispose_ewm(
     ewm_by_plant: dict[str, pd.DataFrame],
-    bdm_lut: pd.Series | None = None,
+    bdm_lut: pd.DataFrame | None = None,
     materials_dispose: pd.DataFrame | None = None,
+    materials_cutoff: date | datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Apply the packaging exclusion and add the BDM column.
 
     ``ewm_by_plant`` maps a plant code to that plant's ``load_ewm`` frame; only
-    the plants supplied get a sheet. ``bdm_lut`` is ``load_master``'s
-    ``Product -> BDM`` lookup; without it the BDM column is present but empty.
+    the plants supplied get a sheet. ``bdm_lut`` is ``load_master``'s frame
+    (columns ``bdm``, ``last_sell_day``, indexed by product); without it the
+    BDM column is present but empty.
 
     ``materials_dispose`` is ``load_materials_dispose``'s frame for plants 2925
     and 2935 (no EWM system); it is split by ``Plant`` into one sheet each,
-    always both, even if a plant has no rows after exclusion.
+    always both, even if a plant has no rows after exclusion. Missing BDM /
+    Last sell day / Last sell date values on those rows are filled from
+    ``bdm_lut``; existing values are kept as-is. If ``materials_cutoff`` is
+    given, a materials-dispose row is kept only when both Shelf Life
+    Expiration Date and Last sell date fall on/before
+    ``materials_cutoff + SLED_CUTOFF_OFFSET_DAYS`` — rows missing either date
+    are dropped. Leave ``materials_cutoff`` as ``None`` to skip date filtering
+    entirely (only the packaging exclusion applies).
 
     Row order is the export's own — the warehouse's ordering is meaningful and
     nothing here re-sorts it."""
@@ -286,7 +345,7 @@ def build_dispose_ewm(
         )
         out = out[~is_packaging].reset_index(drop=True)
 
-        bdm = _clean_text(out[EWM_PRODUCT]).map(bdm_lut) if bdm_lut is not None \
+        bdm = _clean_text(out[EWM_PRODUCT]).map(bdm_lut["bdm"]) if bdm_lut is not None \
             else pd.Series([None] * len(out), index=out.index, dtype=object)
         out.insert(out.columns.get_loc(BDM_INSERT_AFTER) + 1, OUT_BDM, bdm)
 
@@ -298,6 +357,42 @@ def build_dispose_ewm(
             EXCLUDED_PRODUCT_PREFIXES
         )
         md = md[~is_packaging].reset_index(drop=True)
+
+        if bdm_lut is not None:
+            products = _clean_text(md[MATDISP_MATERIAL])
+
+            blank_bdm = _clean_text(md[OUT_BDM]) == ""
+            md[OUT_BDM] = md[OUT_BDM].where(~blank_bdm, products.map(bdm_lut["bdm"]))
+
+            md[MATDISP_LAST_SELL_DAY] = md[MATDISP_LAST_SELL_DAY].where(
+                md[MATDISP_LAST_SELL_DAY].notna(),
+                products.map(bdm_lut["last_sell_day"]),
+            )
+
+        needs_last_sell_date = (
+            md[MATDISP_LAST_SELL_DATE].isna()
+            & md[MATDISP_SLED].notna()
+            & md[MATDISP_LAST_SELL_DAY].notna()
+        )
+        computed_last_sell_date = md[MATDISP_SLED] - pd.to_timedelta(
+            md[MATDISP_LAST_SELL_DAY], unit="D"
+        )
+        md[MATDISP_LAST_SELL_DATE] = md[MATDISP_LAST_SELL_DATE].where(
+            ~needs_last_sell_date, computed_last_sell_date
+        )
+
+        if materials_cutoff is not None:
+            cutoff_ts = pd.Timestamp(materials_cutoff) + pd.Timedelta(
+                days=SLED_CUTOFF_OFFSET_DAYS
+            )
+            keep = (
+                md[MATDISP_SLED].notna()
+                & md[MATDISP_LAST_SELL_DATE].notna()
+                & (md[MATDISP_SLED] <= cutoff_ts)
+                & (md[MATDISP_LAST_SELL_DATE] <= cutoff_ts)
+            )
+            md = md[keep].reset_index(drop=True)
+
         plant_col = _clean_text(md[MATDISP_PLANT])
         for plant in MATERIALS_PLANTS:
             sheets[plant] = md[plant_col == plant].reset_index(drop=True)

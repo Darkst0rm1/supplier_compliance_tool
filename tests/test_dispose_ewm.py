@@ -16,17 +16,21 @@ import openpyxl
 import pandas as pd
 import pytest
 
+from datetime import date
+
 from src.dispose_ewm_engine import (
     DATE_COLS,
     EWM_BATCH,
     EWM_BIN,
     EWM_OWNER,
     EWM_PRODUCT,
+    MATDISP_LAST_SELL_DATE,
     MATDISP_MATERIAL,
     MATDISP_PLANT,
     MATERIALS_PLANTS,
     OUT_BDM,
     PLANTS,
+    SLED_CUTOFF_OFFSET_DAYS,
     DisposeEwmError,
     build_dispose_ewm,
     generate_excel,
@@ -67,12 +71,15 @@ def _ewm_book(rows, owner="BP2910"):
 
 
 def _master_book(rows):
-    """A Last Sell / BDM master. ``rows`` are (product, brand manager)."""
+    """A Last Sell / BDM master. ``rows`` are (product, brand manager) or
+    (product, brand manager, last_sell_day)."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.append(["Plant", "Product Number", "Brand Manager Name", "Last Sell Day"])
-    for product, bdm in rows:
-        ws.append(["2910", product, bdm, 30])
+    for row in rows:
+        product, bdm, *rest = row
+        last_sell_day = rest[0] if rest else 30
+        ws.append(["2910", product, bdm, last_sell_day])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -333,3 +340,151 @@ def test_a_non_materials_dispose_file_is_rejected_by_name():
     buf.seek(0)
     with pytest.raises(DisposeEwmError, match="Materials dispose"):
         load_materials_dispose(buf)
+
+
+# ---------------------------------------------------------------------------
+# Materials-based dispose date filter (2925 / 2935 only)
+# ---------------------------------------------------------------------------
+def test_materials_dispose_cutoff_keeps_rows_with_both_dates_in_window():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-20",
+         "Last sell date": "2026-08-15",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+
+
+def test_materials_dispose_cutoff_drops_row_when_sled_is_past_the_window():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-26",  # cutoff+4 = 08-24
+         "Last sell date": "2026-08-15",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"].empty
+
+
+def test_materials_dispose_cutoff_requires_both_dates_not_either():
+    """AND, not OR: Last sell date past the window drops the row even though
+    SLED is well inside it."""
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-15",
+         "Last sell date": "2026-08-26",  # past cutoff+4 = 08-24
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"].empty
+
+
+def test_materials_dispose_cutoff_offset_boundary_is_inclusive():
+    assert SLED_CUTOFF_OFFSET_DAYS == 4
+    boundary = date(2026, 8, 24)  # 2026-08-20 + 4
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "ON_BOUNDARY", "Plant": "2925",
+         "Shelf Life Expiration Date": boundary.isoformat(),
+         "Last sell date": boundary.isoformat(),
+         "Unrestricted Stock": 1, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+        {"Material": "PAST_BOUNDARY", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-25",
+         "Last sell date": "2026-08-25",
+         "Unrestricted Stock": 1, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["ON_BOUNDARY"]
+
+
+def test_materials_dispose_cutoff_drops_rows_missing_a_date():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-15",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"].empty
+
+
+def test_materials_dispose_no_cutoff_means_no_date_filtering():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2099-01-01",
+         "Last sell date": "2099-01-01",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md)
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+
+
+def test_materials_dispose_last_sell_date_is_computed_from_the_master_when_missing():
+    """A raw export with no Last sell date column populated: computed as
+    SLED - Last Sell Day from the master, then the cutoff applies to it."""
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-20",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    lut = load_master(_master_book([("10076882", "AMOL PRAKASH", 5)]))
+    sheets = build_dispose_ewm(
+        {}, lut, materials_dispose=md, materials_cutoff=date(2026, 8, 20)
+    )
+    assert sheets["2925"][MATDISP_MATERIAL].tolist() == ["10076882"]
+    assert sheets["2925"][MATDISP_LAST_SELL_DATE].iloc[0] == pd.Timestamp("2026-08-15")
+    assert sheets["2925"][OUT_BDM].iloc[0] == "AMOL PRAKASH"
+
+
+def test_materials_dispose_computed_last_sell_date_can_fail_the_cutoff():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-20",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    # Last Sell Day = -10 => Last sell date = 2026-08-30, past cutoff+4 = 08-24
+    lut = load_master(_master_book([("10076882", "AMOL PRAKASH", -10)]))
+    sheets = build_dispose_ewm(
+        {}, lut, materials_dispose=md, materials_cutoff=date(2026, 8, 20)
+    )
+    assert sheets["2925"].empty
+
+
+def test_materials_dispose_without_master_cannot_compute_last_sell_date():
+    """No master + no Last sell date on the row + a cutoff => can't be
+    evaluated, so the row is dropped. This is the scenario the page warns
+    about when only the materials file is uploaded."""
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-15",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    sheets = build_dispose_ewm({}, materials_dispose=md, materials_cutoff=date(2026, 8, 20))
+    assert sheets["2925"].empty
+
+
+def test_materials_dispose_existing_last_sell_date_is_not_recomputed():
+    """The file already carries Last sell date (older, pre-filtered shape) —
+    that value wins over what the master's Last Sell Day would compute."""
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Shelf Life Expiration Date": "2026-08-20",
+         "Last sell date": "2026-08-01",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    # Master's Last Sell Day=5 would compute 2026-08-15, but the existing
+    # 2026-08-01 value must win.
+    lut = load_master(_master_book([("10076882", "AMOL PRAKASH", 5)]))
+    sheets = build_dispose_ewm(
+        {}, lut, materials_dispose=md, materials_cutoff=date(2026, 8, 20)
+    )
+    assert sheets["2925"][MATDISP_LAST_SELL_DATE].iloc[0] == pd.Timestamp("2026-08-01")
+
+
+def test_materials_dispose_bdm_is_filled_from_master_when_blank():
+    md = load_materials_dispose(_materials_dispose_book([
+        {"Material": "10076882", "Plant": "2925",
+         "Unrestricted Stock": 28, "Stock in Quality Inspection": 0, "Blocked Stock": 0},
+    ]))
+    lut = load_master(_master_book([("10076882", "AMOL PRAKASH")]))
+    sheets = build_dispose_ewm({}, lut, materials_dispose=md)
+    assert sheets["2925"][OUT_BDM].tolist() == ["AMOL PRAKASH"]

@@ -17,6 +17,7 @@ from src.dispose_ewm_engine import (
     MATERIALS_PLANTS,
     OUT_BDM,
     PLANTS,
+    SLED_CUTOFF_OFFSET_DAYS,
     DisposeEwmError,
     build_dispose_ewm,
     generate_excel,
@@ -66,6 +67,26 @@ st.caption(
     "display, label and sample material, never sellable stock."
 )
 
+materials_cutoff = None
+if materials_file is not None:
+    materials_cutoff = st.date_input(
+        "Dispose cutoff date (2925/2935 only)",
+        value=date.today(),
+        help=(
+            "A 2925/2935 row is kept only if both Shelf Life Expiration Date "
+            f"and Last sell date fall on/before this date + "
+            f"{SLED_CUTOFF_OFFSET_DAYS} days. Rows missing either date are "
+            "dropped. Last sell date is computed from the master's Last Sell "
+            "Day when the export doesn't already carry it."
+        ),
+    )
+    if master_file is None:
+        st.warning(
+            "No material master uploaded — Last sell date can't be computed "
+            "for a raw materials export, so this filter will drop 2925/2935 "
+            "rows that don't already carry Last sell date."
+        )
+
 supplied = {p: f for p, f in ewm_files.items() if f is not None}
 if (not supplied or master_file is None) and materials_file is None:
     st.info(
@@ -83,6 +104,7 @@ def _process(
     ewm_bytes: tuple[tuple[str, bytes], ...],
     master_bytes: bytes | None,
     materials_bytes: bytes | None,
+    materials_cutoff: date | None,
 ):
     ewm = {
         plant: load_ewm(io.BytesIO(raw), expected_plant=plant)
@@ -93,7 +115,9 @@ def _process(
         load_materials_dispose(io.BytesIO(materials_bytes))
         if materials_bytes else None
     )
-    return build_dispose_ewm(ewm, bdm_lut, materials_dispose)
+    return build_dispose_ewm(
+        ewm, bdm_lut, materials_dispose, materials_cutoff=materials_cutoff
+    )
 
 
 ewm_bytes = tuple((p, f.getvalue()) for p, f in supplied.items())
@@ -104,6 +128,7 @@ with st.spinner("Applying the packaging exclusion and looking up brand managers.
             ewm_bytes,
             master_file.getvalue() if master_file else None,
             materials_file.getvalue() if materials_file else None,
+            materials_cutoff,
         )
     except DisposeEwmError as exc:
         st.error(str(exc))
