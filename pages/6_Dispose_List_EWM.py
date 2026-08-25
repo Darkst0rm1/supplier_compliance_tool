@@ -67,25 +67,24 @@ st.caption(
     "display, label and sample material, never sellable stock."
 )
 
-materials_cutoff = None
-if materials_file is not None:
-    materials_cutoff = st.date_input(
-        "Dispose cutoff date (2925/2935 only)",
-        value=date.today(),
-        help=(
-            "A 2925/2935 row is kept only if both Shelf Life Expiration Date "
-            f"and Last sell date fall on/before this date + "
-            f"{SLED_CUTOFF_OFFSET_DAYS} days. Rows missing either date are "
-            "dropped. Last sell date is computed from the master's Last Sell "
-            "Day when the export doesn't already carry it."
-        ),
+materials_cutoff = st.date_input(
+    "Dispose cutoff date (2925/2935 only)",
+    value=date.today(),
+    help=(
+        "A 2925/2935 row is kept only if both Shelf Life Expiration Date "
+        f"and Last sell date fall on/before this date + "
+        f"{SLED_CUTOFF_OFFSET_DAYS} days. Rows missing either date are "
+        "dropped. Last sell date is computed from the master's Last Sell "
+        "Day when the export doesn't already carry it. Only applies if you "
+        "upload the materials dispose export above."
+    ),
+)
+if materials_file is not None and master_file is None:
+    st.warning(
+        "No material master uploaded — Last sell date can't be computed "
+        "for a raw materials export, so this filter will drop 2925/2935 "
+        "rows that don't already carry Last sell date."
     )
-    if master_file is None:
-        st.warning(
-            "No material master uploaded — Last sell date can't be computed "
-            "for a raw materials export, so this filter will drop 2925/2935 "
-            "rows that don't already carry Last sell date."
-        )
 
 supplied = {p: f for p, f in ewm_files.items() if f is not None}
 if (not supplied or master_file is None) and materials_file is None:
