@@ -9,6 +9,7 @@ a read-only view of the same numbers.
 """
 from __future__ import annotations
 
+import io
 from datetime import date
 
 import pandas as pd
@@ -145,7 +146,18 @@ else:
     st.caption("No supplier had any inbound POs this month — nothing to rate.")
 
 st.subheader("Full Supplier Summary")
-st.dataframe(summary.drop(columns=["Compliance % (num)"]), use_container_width=True, hide_index=True)
+summary_display = summary.drop(columns=["Compliance % (num)"])
+st.dataframe(summary_display, use_container_width=True, hide_index=True)
+
+xlsx_buf = io.BytesIO()
+with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
+    summary_display.to_excel(writer, sheet_name="Supplier Summary", index=False)
+st.download_button(
+    "⬇️ Download Supplier Summary (.xlsx)",
+    data=xlsx_buf.getvalue(),
+    file_name=f"Supplier_Summary_{sel_year}_{sel_month:02d}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 # ---------------------------------------------------------------------------
 # Save this run + week-over-week history (Postgres-backed, optional)
@@ -179,7 +191,9 @@ if store is not None:
                 "midday is safe."
             )
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not save snapshot: {exc}")
+            st.error(f"Could not save snapshot: {type(exc).__name__}: {exc}")
+            with st.expander("Full error detail"):
+                st.exception(exc)
 
     try:
         snap_dates = store.list_snapshot_dates()
