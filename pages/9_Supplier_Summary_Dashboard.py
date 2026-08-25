@@ -68,37 +68,58 @@ if not ready:
     st.info("Upload both the SAP and Portal exports to generate the Supplier Summary.")
     st.stop()
 
-if not st.button("Generate Supplier Summary", type="primary"):
+# Generating is a regular st.button, and so is Save further down. A regular
+# button's True value only lasts for the one script rerun it triggered —
+# clicking ANY other button on the page (like Save) reruns the whole script
+# with this one back to False. If Save lived inside "if st.button(Generate):"
+# clicking it would hit st.stop() here before Save's own handler ever ran —
+# it would look like it did nothing, and nothing would reach the database.
+# Stashing the generated summary in session_state instead means every later
+# widget (Save, the slider, the vendor multiselect) reruns the script without
+# losing it.
+if st.button("Generate Supplier Summary", type="primary"):
+    try:
+        with st.spinner("Loading SAP file..."):
+            sap_df = load_sap(sap_file)
+    except SapImportError as e:
+        st.error(f"SAP file error: {e}")
+        st.stop()
+
+    try:
+        with st.spinner("Loading Portal file..."):
+            portal_df = load_portal(portal_file, sel_year, sel_month)
+    except PortalImportError as e:
+        st.error(f"Portal file error: {e}")
+        st.stop()
+
+    exceptions, tracker_names, exceptions_error = load_exceptions_or_empty()
+    if exceptions_error:
+        st.info(exceptions_error)
+
+    with st.spinner("Applying compliance rules..."):
+        sheets = build_report(
+            sap_df, portal_df, sel_year, sel_month,
+            exceptions=exceptions, tracker_names=tracker_names,
+        )
+
+    summary = sheets["Supplier Summary"]
+    if summary.empty:
+        st.warning("No suppliers in scope for this month — nothing to chart.")
+        st.stop()
+
+    st.session_state["ssd_summary"] = summary
+    st.session_state["ssd_report_year"] = sel_year
+    st.session_state["ssd_report_month"] = sel_month
+
+if "ssd_summary" not in st.session_state:
     st.stop()
 
-try:
-    with st.spinner("Loading SAP file..."):
-        sap_df = load_sap(sap_file)
-except SapImportError as e:
-    st.error(f"SAP file error: {e}")
-    st.stop()
-
-try:
-    with st.spinner("Loading Portal file..."):
-        portal_df = load_portal(portal_file, sel_year, sel_month)
-except PortalImportError as e:
-    st.error(f"Portal file error: {e}")
-    st.stop()
-
-exceptions, tracker_names, exceptions_error = load_exceptions_or_empty()
-if exceptions_error:
-    st.info(exceptions_error)
-
-with st.spinner("Applying compliance rules..."):
-    sheets = build_report(
-        sap_df, portal_df, sel_year, sel_month,
-        exceptions=exceptions, tracker_names=tracker_names,
-    )
-
-summary = sheets["Supplier Summary"]
-if summary.empty:
-    st.warning("No suppliers in scope for this month — nothing to chart.")
-    st.stop()
+# The year/month a Save or download uses come from what was actually
+# generated, not whatever the dropdowns currently show — so changing the
+# dropdown without re-clicking Generate can't mislabel a stale summary.
+summary = st.session_state["ssd_summary"]
+sel_year = st.session_state["ssd_report_year"]
+sel_month = st.session_state["ssd_report_month"]
 
 # Numeric compliance %, computed the same way summary_to_snapshot_rows does
 # (found / with-inbound), not parsed from the sheet's formatted "82.3%"
