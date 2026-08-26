@@ -8,7 +8,7 @@ st.set_page_config(page_title="Supplier Compliance Dashboard", layout="wide")
 pg = st.navigation([
     st.Page(
         "pages/1_Supplier_Compliance_Dashboard.py",
-        title="Supplier Compliance Dashboard",
+        title="Supplier Compliance Dashboard (ASN)",
     ),
     st.Page(
         "pages/2_Delivery_Fill_Rate_Dashboard.py",
@@ -24,7 +24,7 @@ pg = st.navigation([
     ),
     st.Page(
         "pages/5_Overstock_Report.py",
-        title="Overstock Report Dashboard",
+        title="Overstock Report Dashboard (EWM)",
     ),
     st.Page(
         "pages/6_Dispose_List_EWM.py",
