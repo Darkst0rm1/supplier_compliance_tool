@@ -90,10 +90,13 @@ with col_oo:
         help=(
             "Sales orders already booked with a future Requested Delivery "
             "Date (Sales Order, Material, Requested Delivery Date, Order "
-            "Quantity). This export has no Plant column — Plant is resolved "
-            "by matching Sales Order + Material back to the SAP Sales Order "
-            "exports above; a row that can't be matched is excluded from "
-            "plant-level Open Orders (see Data Quality)."
+            "Quantity). Best if this includes a Plant column — add it as a "
+            "field when pulling this report from SAP, the same way the "
+            "Sales Order export has a Key Account #/Plant variant. Without "
+            "a Plant column, it's resolved by matching back to the SAP "
+            "Sales Order exports above, which usually leaves most rows "
+            "unmatched (an open order can reference a Sales Order created "
+            "many months before its delivery date — see Data Quality)."
         ),
     )
 with col_po:

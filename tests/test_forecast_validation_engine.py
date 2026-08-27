@@ -583,6 +583,35 @@ def test_load_open_orders_missing_required_column_raises():
         load_open_orders(_xlsx(bad_headers, [["1001", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), 5, "B", "C", "D"]]))
 
 
+def test_load_open_orders_uses_plant_column_directly_when_present():
+    """If this report is re-pulled from SAP with Plant added as a column
+    (the same field-layout flexibility the Sales Order export already has),
+    it must be read directly -- no join needed, and no ambiguity even for
+    a material stocked at multiple plants."""
+    headers = OPEN_ORDERS_HEADERS + ["Plant"]
+    rows = [
+        ["1001", "Ontario Independents", "10026930", "TINKYA ELBOW BROWN 454G", "ZOR3",
+         datetime(2026, 2, 23), datetime(2026, 10, 20), 5, "MICHELLE JEWELL NT", "Anabel Lopez",
+         "Brandon Fuselli", "2920"],
+    ]
+    df = load_open_orders(_xlsx(headers, rows, sheet="SAPUI5 Export"))
+    assert df.iloc[0]["Plant"] == "2920"
+
+
+def test_resolve_open_order_plants_never_overwrites_a_plant_already_present():
+    fact_rows = [_plant_row(**{"Sales Order": "1001", "Material": "10026930", "Plant": "2910"})]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, fact_rows))])
+
+    headers = OPEN_ORDERS_HEADERS + ["Plant"]
+    open_orders = load_open_orders(_xlsx(headers, [
+        ["1001", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), datetime(2026, 10, 20), 5,
+         "B", "C", "D", "2920"],
+    ], sheet="SAPUI5 Export"))
+    resolved = resolve_open_order_plants(open_orders, fact)
+    # 2920 from the file's own Plant column, NOT 2910 from the fact join.
+    assert resolved.iloc[0]["Plant"] == "2920"
+
+
 def test_resolve_open_order_plants_joins_from_fact_and_leaves_unresolved_blank():
     fact_rows = [
         _plant_row(**{"Sales Order": "1001", "Material": "10026930", "Plant": "2910"}),
@@ -597,6 +626,41 @@ def test_resolve_open_order_plants_joins_from_fact_and_leaves_unresolved_blank()
     resolved = resolved.set_index("Sales Order")
     assert resolved.loc["1001", "Plant"] == "2910"
     assert resolved.loc["9999", "Plant"] == ""
+
+
+def test_resolve_open_order_plants_falls_back_to_material_when_single_plant():
+    """Open Orders can reference a Sales Order created months before its
+    requested delivery date -- if the uploaded exports don't happen to
+    cover that creation month, the exact Sales Order + Material match
+    fails entirely. A material seen at exactly one plant anywhere in the
+    uploaded data should still resolve from that observed fact."""
+    fact_rows = [
+        _plant_row(**{"Sales Order": "OTHER-SO", "Material": "10026930", "Plant": "2910"}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, fact_rows))])
+
+    # "5555" never appears in fact at all -- only the material does.
+    open_orders = load_open_orders(_open_orders_xlsx([
+        ["5555", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), datetime(2026, 10, 20), 5, "B", "C", "D"],
+    ]))
+    resolved = resolve_open_order_plants(open_orders, fact)
+    assert resolved.iloc[0]["Plant"] == "2910"
+
+
+def test_resolve_open_order_plants_ambiguous_material_stays_unresolved():
+    """A material observed at more than one plant is genuinely ambiguous --
+    must NOT guess which plant this specific open order belongs to."""
+    fact_rows = [
+        _plant_row(**{"Sales Order": "A1", "Material": "10026930", "Plant": "2910"}),
+        _plant_row(**{"Sales Order": "A2", "Material": "10026930", "Plant": "2920"}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, fact_rows))])
+
+    open_orders = load_open_orders(_open_orders_xlsx([
+        ["9999", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), datetime(2026, 10, 20), 5, "B", "C", "D"],
+    ]))
+    resolved = resolve_open_order_plants(open_orders, fact)
+    assert resolved.iloc[0]["Plant"] == ""
 
 
 # ---------------------------------------------------------------------------

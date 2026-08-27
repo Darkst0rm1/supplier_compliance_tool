@@ -409,9 +409,17 @@ OPEN_PO_REQUIRED = ["Plant", "Material", "Delivery Date", "PO Quantity"]
 
 def load_open_orders(file) -> pd.DataFrame:
     """Read the Open Orders export — sales orders already booked (Creation
-    Date) but requested for delivery in a future month. This export has no
-    Plant column of its own; use :func:`resolve_open_order_plants` to attach
-    one by matching back to the combined sales-order fact table."""
+    Date) but requested for delivery in a future month.
+
+    The standard pull of this report has no Plant column, since an open
+    order can reference a Sales Order created many months before its
+    requested delivery date — often well outside whatever monthly SAP
+    exports were uploaded — so matching back to the combined sales-order
+    fact table (:func:`resolve_open_order_plants`) resolves only a small
+    fraction. If this report is re-pulled from SAP with Plant added as a
+    column (the same "field layout" flexibility the Sales Order export
+    already has, with its Key Account #/Plant variants), it's read directly
+    here and skips that unreliable join entirely."""
     df = pd.read_excel(file, sheet_name=0)
     missing = [c for c in OPEN_ORDERS_REQUIRED if c not in df.columns]
     if missing:
@@ -426,6 +434,8 @@ def load_open_orders(file) -> pd.DataFrame:
     out["Requested Delivery Date"] = pd.to_datetime(df["Requested Delivery Date"], errors="coerce")
     out["Open Order Qty"] = pd.to_numeric(df["Order Quantity (CS)"], errors="coerce").fillna(0)
     out["Buyer Name"] = df["BDM Description"].astype(str).str.strip() if "BDM Description" in df.columns else ""
+    plant_col = next((c for c in ("Plant", "Plnt") if c in df.columns), None)
+    out["Plant"] = _clean_id(df[plant_col]) if plant_col else ""
     out = out.dropna(subset=["Requested Delivery Date"])
     out["Year"] = out["Requested Delivery Date"].dt.year
     out["Month"] = out["Requested Delivery Date"].dt.month
@@ -433,21 +443,61 @@ def load_open_orders(file) -> pd.DataFrame:
 
 
 def resolve_open_order_plants(open_orders: pd.DataFrame, fact: pd.DataFrame) -> pd.DataFrame:
-    """Attach Plant to each Open Orders row by matching Sales Order +
-    Material back to the combined sales-order fact table (which does carry
-    Plant, from the SAP exports that have it). A row whose Sales Order +
-    Material isn't found there keeps a blank Plant and is excluded from
-    plant-level Open Orders totals — never guessed from Material alone,
-    since one material can sit at more than one plant."""
-    if open_orders.empty:
-        return open_orders.assign(Plant="")
-    lookup = (
-        fact[fact["Plant"] != ""]
-        .drop_duplicates(subset=["Sales Order", "Material"])[["Sales Order", "Material", "Plant"]]
+    """Fill in Plant for any Open Orders row that doesn't already have one.
+
+    A Plant already present (the export was re-pulled from SAP with Plant
+    added as a column — see :func:`load_open_orders`) is never overwritten.
+    For everything else, two fallback passes, most-precise first:
+
+    1. Exact match on Sales Order + Material against the combined
+       sales-order fact table. This only succeeds if that specific order
+       happens to fall within a month the caller uploaded a SAP export
+       for — Open Orders can reference orders created many months earlier
+       than their requested delivery date, so with a partial set of
+       monthly exports uploaded, most rows won't match here at all.
+    2. Material-only fallback: if a material has been observed at exactly
+       ONE plant anywhere in the uploaded sales-order data, that's an
+       observed fact, not a guess, and is used for any of that material's
+       still-unresolved rows. A material seen at more than one plant is
+       genuinely ambiguous and stays unresolved rather than picking one
+       arbitrarily — this is reported in Data Quality, not silently lost.
+    """
+    result = open_orders.copy()
+    if "Plant" not in result.columns:
+        result["Plant"] = ""
+    if result.empty:
+        return result
+
+    plant_fact = fact[fact["Plant"] != ""]
+
+    def _fill_unresolved(lookup: pd.Series, key_cols: list[str]) -> None:
+        # pandas' Arrow-backed string dtype rejects a raw NaN assigned into
+        # a string column (only None/an actual string is accepted) --
+        # fillna the mapped result before assigning, not after.
+        unresolved = result["Plant"] == ""
+        if not unresolved.any():
+            return
+        keys = result.loc[unresolved, key_cols]
+        index = pd.MultiIndex.from_frame(keys) if len(key_cols) > 1 else pd.Index(keys.iloc[:, 0])
+        matched = pd.Series(index.map(lookup), index=keys.index).fillna("")
+        result.loc[unresolved, "Plant"] = matched
+
+    so_lookup = (
+        plant_fact.drop_duplicates(subset=["Sales Order", "Material"])
+        .set_index(["Sales Order", "Material"])["Plant"]
     )
-    merged = open_orders.merge(lookup, on=["Sales Order", "Material"], how="left")
-    merged["Plant"] = merged["Plant"].fillna("")
-    return merged
+    _fill_unresolved(so_lookup, ["Sales Order", "Material"])
+
+    plant_counts = plant_fact.groupby("Material")["Plant"].nunique()
+    single_plant_materials = set(plant_counts[plant_counts == 1].index)
+    material_plant = (
+        plant_fact[plant_fact["Material"].isin(single_plant_materials)]
+        .drop_duplicates(subset=["Material"])
+        .set_index("Material")["Plant"]
+    )
+    _fill_unresolved(material_plant, ["Material"])
+
+    return result
 
 
 def load_open_po(file) -> pd.DataFrame:
@@ -890,9 +940,12 @@ def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
     if open_orders is not None and not open_orders.empty:
         add("Open Orders rows loaded", f"{len(open_orders):,}")
         unresolved = int((open_orders.get("Plant", "") == "").sum()) if "Plant" in open_orders.columns else len(open_orders)
-        add("Open Orders rows with no matching Sales Order + Material in the "
-            "uploaded sales-order exports (Plant unknown, excluded from "
-            "plant-level Open Orders)", f"{unresolved:,}")
+        add("Open Orders rows with Plant still unknown (no Plant column in "
+            "the export, no matching Sales Order + Material in the "
+            "uploaded sales-order exports, and the material sits at more "
+            "than one plant) — excluded from plant-level Open Orders. "
+            "Re-pull the Open Orders report from SAP with Plant added as a "
+            "column to fix this directly", f"{unresolved:,} of {len(open_orders):,}")
     else:
         add("Open Orders rows loaded", "0")
 
