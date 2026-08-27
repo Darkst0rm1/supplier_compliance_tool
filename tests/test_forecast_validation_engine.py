@@ -22,7 +22,11 @@ from src.forecast_validation_engine import (
     default_history_and_forecast_months,
     generate_excel,
     load_forecast,
+    load_open_orders,
+    load_open_po,
     load_sales_orders,
+    load_stock_on_hand,
+    resolve_open_order_plants,
     same_period_window,
 )
 
@@ -472,10 +476,180 @@ def test_generate_excel_main_sheet_matches_template_layout():
     wb = openpyxl.load_workbook(io.BytesIO(data))
     assert wb.sheetnames[0] == "Sheet1"
     ws = wb["Sheet1"]
-    header = [ws.cell(2, c).value for c in range(1, 30)]
+    header = [ws.cell(2, c).value for c in range(1, 39)]
     assert header[:5] == ["Plant", "Mat #", "Desc", "Brand name", "Buyer name"]
     assert header[5:17] == ["Sept", "Oct ", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "June ", "July", "Aug (partial)"]
     assert header[17:29] == ["Sept", "Oct ", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "June ", "July", "Aug"]
+    # build_main_table always carries Open Orders/Open PO/Stock on Hand
+    # columns (blank when no such file was uploaded), so Sheet1 always
+    # matches the extended "output_needed_with_stock_on_hand" layout.
+    assert header[29:33] == ["Sept", "Oct", "Nov", "Dec"]
+    assert header[33:37] == ["Sept", "Oct", "Nov", "Dec"]
+    # Stock on Hand has no monthly breakdown, so its label lives in the
+    # vertically-merged AL1:AL2 (row 1), not row 2 -- matching the source
+    # template exactly.
+    assert ws.cell(1, 38).value == "Stock on Hand"
     merged = {str(r) for r in ws.merged_cells.ranges}
-    assert merged == {"F1:Q1", "R1:AC1"}
+    assert merged == {"F1:Q1", "R1:AC1", "AD1:AG1", "AH1:AK1", "AL1:AL2"}
     assert set(wb.sheetnames) == {"Sheet1", "Forecast Validation", "Plant Summary", "Item Detail", "Monthly Summary", "Data Quality"}
+
+
+# ---------------------------------------------------------------------------
+# Open Orders
+# ---------------------------------------------------------------------------
+OPEN_ORDERS_HEADERS = ["Sales Order", "Key Account Name", "Material", "Material Description",
+                        "Sales Order Type", "Creation Date", "Requested Delivery Date",
+                        "Order Quantity (CS)", "BDM Description", "Purchasing Group Name", "CDM Name"]
+
+
+def _open_orders_xlsx(rows):
+    return _xlsx(OPEN_ORDERS_HEADERS, rows, sheet="SAPUI5 Export")
+
+
+def test_load_open_orders_parses_and_buckets_by_requested_month():
+    rows = [
+        ["1001", "Ontario Independents", "10026930", "TINKYA ELBOW BROWN 454G", "ZOR3",
+         datetime(2026, 2, 23), datetime(2026, 10, 20), 5, "MICHELLE JEWELL NT", "Anabel Lopez", "Brandon Fuselli"],
+    ]
+    df = load_open_orders(_open_orders_xlsx(rows))
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["Sales Order"] == "1001"
+    assert row["Material"] == "10026930"
+    assert row["Open Order Qty"] == 5
+    assert row["Buyer Name"] == "MICHELLE JEWELL NT"
+    assert (row["Year"], row["Month"]) == (2026, 10)
+
+
+def test_load_open_orders_missing_required_column_raises():
+    bad_headers = [h for h in OPEN_ORDERS_HEADERS if h != "Requested Delivery Date"]
+    with pytest.raises(ForecastValidationError):
+        load_open_orders(_xlsx(bad_headers, [["1001", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), 5, "B", "C", "D"]]))
+
+
+def test_resolve_open_order_plants_joins_from_fact_and_leaves_unresolved_blank():
+    fact_rows = [
+        _plant_row(**{"Sales Order": "1001", "Material": "10026930", "Plant": "2910"}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, fact_rows))])
+
+    open_orders = load_open_orders(_open_orders_xlsx([
+        ["1001", "A", "10026930", "D", "ZOR3", datetime(2026, 2, 23), datetime(2026, 10, 20), 5, "B", "C", "D"],
+        ["9999", "A", "99999999", "D", "ZOR3", datetime(2026, 2, 23), datetime(2026, 10, 20), 3, "B", "C", "D"],
+    ]))
+    resolved = resolve_open_order_plants(open_orders, fact)
+    resolved = resolved.set_index("Sales Order")
+    assert resolved.loc["1001", "Plant"] == "2910"
+    assert resolved.loc["9999", "Plant"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Open PO / Stock on Hand
+# ---------------------------------------------------------------------------
+OPEN_PO_HEADERS = ["PO Number", "Purchasing Group Description", "Document Type", "Vendor",
+                    "Vendor Name", "Supplier Name", "Freight Supplier Name", "Inco Terms",
+                    "Delivery Date", "Delivery Date Derived Field", "Plant", "Material",
+                    "Material Description", "Stock on Hand", "PO Quantity", "Appt. Plant",
+                    "BDM Description"]
+
+
+def _open_po_xlsx(rows):
+    return _xlsx(OPEN_PO_HEADERS, rows, sheet="SAPUI5 Export")
+
+
+def test_load_open_po_parses_and_buckets_by_delivery_month():
+    rows = [
+        ["1000006577", "Jennifer Yang", "NB", "70000332", "WALKERS LTD", "WALKERS LTD",
+         "Universal Logistics", "FOB", datetime(2026, 9, 1), "AB", "2930", "10078019",
+         "JW ADVENT CALENDAR", 0, 816.0, None, "SAMANTHA RODRIGUES GB"],
+    ]
+    df = load_open_po(_open_po_xlsx(rows))
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["Plant"] == "2930"
+    assert row["Material"] == "10078019"
+    assert row["Open PO Qty"] == 816
+    assert row["Stock on Hand"] == 0
+    assert (row["Year"], row["Month"]) == (2026, 9)
+
+
+def test_load_open_po_missing_required_column_raises():
+    bad_headers = [h for h in OPEN_PO_HEADERS if h != "Delivery Date"]
+    with pytest.raises(ForecastValidationError):
+        load_open_po(_xlsx(bad_headers, [["1", "A", "NB", "V", "VN", "SN", "FS", "FOB",
+                                           "2930", "10078019", "D", 0, 816.0, None, "B"]]))
+
+
+def test_load_stock_on_hand_sums_across_batches():
+    headers = ["Material Group Name", "Material", "Material Description", "Plant", "Plant Name",
+               "Batch", "Storage Location", "Shelf Life Expiration Date", "Unrestricted Stock",
+               "Production Date"]
+    rows = [
+        ["AGROPUR", "10019604", "OKA CHEESE", "2910", "TOL Mississauga", "B1", "1100",
+         datetime(2026, 8, 19), 6, datetime(2026, 5, 21)],
+        ["AGROPUR", "10019604", "OKA CHEESE", "2910", "TOL Mississauga", "B2", "1100",
+         datetime(2026, 8, 19), 4, datetime(2026, 5, 21)],
+    ]
+    df = load_stock_on_hand(_xlsx(headers, rows, sheet="SAPUI5 Export"))
+    row = df[(df["Plant"] == "2910") & (df["Material"] == "10019604")].iloc[0]
+    assert row["Stock on Hand"] == 10  # two batches summed
+
+
+def test_load_stock_on_hand_missing_required_column_raises():
+    headers = ["Material", "Plant"]
+    with pytest.raises(ForecastValidationError):
+        load_stock_on_hand(_xlsx(headers, [["10019604", "2910"]], sheet="SAPUI5 Export"))
+
+
+# ---------------------------------------------------------------------------
+# build_main_table with Open Orders / Open PO / Stock on Hand
+# ---------------------------------------------------------------------------
+def test_build_main_table_includes_open_orders_po_and_stock():
+    fact = _fact_two_years()
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+
+    open_orders = pd.DataFrame([{
+        "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9, "Open Order Qty": 42,
+    }])
+    open_po = pd.DataFrame([{
+        "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9,
+        "Open PO Qty": 100, "Stock on Hand": 7,
+    }])
+    stock = pd.DataFrame([{"Plant": "2910", "Material": "10026930", "Stock on Hand": 250}])
+
+    table = build_main_table(fact, empty_forecast, hist, fc,
+                              open_orders=open_orders, open_po=open_po, stock_on_hand=stock)
+    row = table[table["Mat #"] == "10026930"].iloc[0]
+    assert row["OO|Sept"] == 42
+    assert row["PO|Sept"] == 100
+    # dedicated Stock on Hand export (250) takes priority over the Open PO
+    # file's incidental figure (7)
+    assert row["Stock on Hand"] == 250
+
+
+def test_build_main_table_stock_on_hand_falls_back_to_open_po_when_no_dedicated_export():
+    fact = _fact_two_years()
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+    open_po = pd.DataFrame([{
+        "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9,
+        "Open PO Qty": 100, "Stock on Hand": 7,
+    }])
+    table = build_main_table(fact, empty_forecast, hist, fc, open_po=open_po)
+    row = table[table["Mat #"] == "10026930"].iloc[0]
+    assert row["Stock on Hand"] == 7
+
+
+def test_build_main_table_includes_material_with_only_an_open_po():
+    """A material that has never sold but has an incoming PO should still
+    appear -- it's real, actionable information even with zero history."""
+    fact = _fact_two_years()
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+    open_po = pd.DataFrame([{
+        "Plant": "2910", "Material": "55555555", "Year": 2026, "Month": 9,
+        "Open PO Qty": 60, "Stock on Hand": None,
+    }])
+    table = build_main_table(fact, empty_forecast, hist, fc, open_po=open_po)
+    assert (table["Mat #"] == "55555555").any()

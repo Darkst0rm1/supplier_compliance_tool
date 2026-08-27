@@ -38,6 +38,14 @@ TEMPLATE_MONTH_LABELS = ["Sept", "Oct ", "Nov", "Dec", "Jan", "Feb", "Mar",
                           "Apr", "May", "June ", "July", "Aug"]
 TEMPLATE_ID_COLS = ["Plant", "Mat #", "Desc", "Brand name", "Buyer name"]
 
+# The extended template ("output_needed_with_stock_on_hand") adds Open
+# Orders and Open PO for just the first 4 forecast months (near-term supply/
+# demand visibility, not a full 12-month projection) plus one Stock on Hand
+# column. Note this section's own labels have NO trailing space ("Oct", not
+# "Oct ") — that inconsistency is in the source template itself and is
+# reproduced here deliberately, not a typo.
+OPEN_MONTH_LABELS = ["Sept", "Oct", "Nov", "Dec"]
+
 
 class ForecastValidationError(Exception):
     """Raised when an uploaded file is missing columns this engine needs."""
@@ -367,8 +375,8 @@ def _load_forecast_mrp(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     out = pd.DataFrame()
-    out["Plant"] = df[plnt_col].astype(str).str.strip()
-    out["Material"] = _clean_material(df["Material"])
+    out["Plant"] = _clean_id(df[plnt_col])
+    out["Material"] = _clean_id(df["Material"])
     out["_date"] = pd.to_datetime(df[date_col], errors="coerce")
     out["Forecast Qty"] = pd.to_numeric(df["Planned qty"], errors="coerce").fillna(0)
     # This export's "Brand Manager" column holds a person's name (matching
@@ -386,6 +394,103 @@ def _load_forecast_mrp(df: pd.DataFrame) -> pd.DataFrame:
         "Brand Name": _first_nonblank, "Material Description": _first_nonblank,
     })
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# Open Orders / Open PO / Stock on Hand
+# ---------------------------------------------------------------------------
+OPEN_ORDERS_REQUIRED = ["Sales Order", "Material", "Requested Delivery Date", "Order Quantity (CS)"]
+OPEN_PO_REQUIRED = ["Plant", "Material", "Delivery Date", "PO Quantity"]
+
+
+def load_open_orders(file) -> pd.DataFrame:
+    """Read the Open Orders export — sales orders already booked (Creation
+    Date) but requested for delivery in a future month. This export has no
+    Plant column of its own; use :func:`resolve_open_order_plants` to attach
+    one by matching back to the combined sales-order fact table."""
+    df = pd.read_excel(file, sheet_name=0)
+    missing = [c for c in OPEN_ORDERS_REQUIRED if c not in df.columns]
+    if missing:
+        raise ForecastValidationError(
+            f"Open Orders export is missing required column(s): {', '.join(missing)}. "
+            f"Found columns: {', '.join(df.columns)}"
+        )
+
+    out = pd.DataFrame()
+    out["Sales Order"] = _clean_id(df["Sales Order"])
+    out["Material"] = _clean_id(df["Material"])
+    out["Requested Delivery Date"] = pd.to_datetime(df["Requested Delivery Date"], errors="coerce")
+    out["Open Order Qty"] = pd.to_numeric(df["Order Quantity (CS)"], errors="coerce").fillna(0)
+    out["Buyer Name"] = df["BDM Description"].astype(str).str.strip() if "BDM Description" in df.columns else ""
+    out = out.dropna(subset=["Requested Delivery Date"])
+    out["Year"] = out["Requested Delivery Date"].dt.year
+    out["Month"] = out["Requested Delivery Date"].dt.month
+    return out
+
+
+def resolve_open_order_plants(open_orders: pd.DataFrame, fact: pd.DataFrame) -> pd.DataFrame:
+    """Attach Plant to each Open Orders row by matching Sales Order +
+    Material back to the combined sales-order fact table (which does carry
+    Plant, from the SAP exports that have it). A row whose Sales Order +
+    Material isn't found there keeps a blank Plant and is excluded from
+    plant-level Open Orders totals — never guessed from Material alone,
+    since one material can sit at more than one plant."""
+    if open_orders.empty:
+        return open_orders.assign(Plant="")
+    lookup = (
+        fact[fact["Plant"] != ""]
+        .drop_duplicates(subset=["Sales Order", "Material"])[["Sales Order", "Material", "Plant"]]
+    )
+    merged = open_orders.merge(lookup, on=["Sales Order", "Material"], how="left")
+    merged["Plant"] = merged["Plant"].fillna("")
+    return merged
+
+
+def load_open_po(file) -> pd.DataFrame:
+    """Read the Open PO export — inbound purchase orders not yet received,
+    by Plant + Material + expected Delivery month. Also carries an
+    incidental Stock on Hand snapshot per Plant + Material, used as a
+    fallback Stock on Hand source when no dedicated Materials/inventory
+    export is uploaded."""
+    df = pd.read_excel(file, sheet_name=0)
+    missing = [c for c in OPEN_PO_REQUIRED if c not in df.columns]
+    if missing:
+        raise ForecastValidationError(
+            f"Open PO export is missing required column(s): {', '.join(missing)}. "
+            f"Found columns: {', '.join(df.columns)}"
+        )
+
+    out = pd.DataFrame()
+    out["Plant"] = _clean_id(df["Plant"])
+    out["Material"] = _clean_id(df["Material"])
+    out["Delivery Date"] = pd.to_datetime(df["Delivery Date"], errors="coerce")
+    out["Open PO Qty"] = pd.to_numeric(df["PO Quantity"], errors="coerce").fillna(0)
+    out["Stock on Hand"] = pd.to_numeric(df["Stock on Hand"], errors="coerce") if "Stock on Hand" in df.columns else np.nan
+    out = out.dropna(subset=["Delivery Date"])
+    out["Year"] = out["Delivery Date"].dt.year
+    out["Month"] = out["Delivery Date"].dt.month
+    return out
+
+
+def load_stock_on_hand(file) -> pd.DataFrame:
+    """Read a dedicated Materials/inventory export (the same shape the
+    Overstock and Risky Inventory pages already use) and reduce it to one
+    Unrestricted Stock total per Plant + Material — the authoritative Stock
+    on Hand source when uploaded, preferred over the incidental figure
+    carried in the Open PO export."""
+    df = pd.read_excel(file, sheet_name=0)
+    required = ["Plant", "Material", "Unrestricted Stock"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ForecastValidationError(
+            f"Materials/Stock export is missing required column(s): {', '.join(missing)}. "
+            f"Found columns: {', '.join(df.columns)}"
+        )
+    out = pd.DataFrame()
+    out["Plant"] = _clean_id(df["Plant"])
+    out["Material"] = _clean_id(df["Material"])
+    out["Stock on Hand"] = pd.to_numeric(df["Unrestricted Stock"], errors="coerce").fillna(0)
+    return out.groupby(["Plant", "Material"], as_index=False)["Stock on Hand"].sum()
 
 
 # ---------------------------------------------------------------------------
@@ -457,18 +562,32 @@ def _qty_pivot(df: pd.DataFrame, group_cols: list[str], qty_col: str) -> dict:
 def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
                       hist_months: list[tuple[int, int]],
                       fc_months: list[tuple[int, int]],
-                      required_plants: list[str] = REQUIRED_PLANTS) -> pd.DataFrame:
+                      required_plants: list[str] = REQUIRED_PLANTS,
+                      open_orders: pd.DataFrame | None = None,
+                      open_po: pd.DataFrame | None = None,
+                      stock_on_hand: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build the main sheet in the exact required layout: Plant, Mat #, Desc,
     Brand name, Buyer name, then 12 history (actual Invoice Qty) columns,
-    then 12 forecast columns. One row per Plant + Material actually observed
-    in the sales-order data for that plant — materials with no history but a
-    forecast entry are included too, so a brand-new item still shows its
-    forecast."""
+    12 forecast columns, then — when supplied — Open Orders and Open PO for
+    the first 4 forecast months and one Stock on Hand column, matching the
+    extended "output_needed_with_stock_on_hand" template. One row per Plant +
+    Material actually observed anywhere (sales history, forecast, open
+    orders, open PO, or stock) — a brand-new item with only an open PO still
+    shows up."""
     plant_fact = fact[fact["Plant"].isin(required_plants) & (fact["Material"] != "")]
+    open_orders = open_orders if open_orders is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open Order Qty"])
+    open_po = open_po if open_po is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open PO Qty", "Stock on Hand"])
+    stock_on_hand = stock_on_hand if stock_on_hand is not None else pd.DataFrame(columns=["Plant", "Material", "Stock on Hand"])
 
     keys = set(zip(plant_fact["Plant"], plant_fact["Material"]))
     if not forecast.empty:
         keys |= set(zip(forecast["Plant"], forecast["Material"]))
+    if not open_orders.empty:
+        keys |= set(zip(open_orders["Plant"], open_orders["Material"]))
+    if not open_po.empty:
+        keys |= set(zip(open_po["Plant"], open_po["Material"]))
+    if not stock_on_hand.empty:
+        keys |= set(zip(stock_on_hand["Plant"], stock_on_hand["Material"]))
     keys = {(p, m) for p, m in keys if p in required_plants and m}
 
     desc_lookup = (
@@ -485,6 +604,23 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
 
     hist_pivot = _qty_pivot(plant_fact, ["Plant", "Material", "Year", "Month"], "Invoice Qty")
     fc_pivot = _qty_pivot(forecast, ["Plant", "Material", "Forecast Year", "Forecast Month"], "Forecast Qty")
+    oo_pivot = _qty_pivot(open_orders, ["Plant", "Material", "Year", "Month"], "Open Order Qty")
+    po_pivot = _qty_pivot(open_po, ["Plant", "Material", "Year", "Month"], "Open PO Qty")
+
+    # Stock on Hand: prefer the dedicated Materials/inventory export when
+    # supplied (authoritative); otherwise fall back to the incidental figure
+    # carried in the Open PO export (only covers materials with an open PO).
+    if not stock_on_hand.empty:
+        stock_lookup = stock_on_hand.set_index(["Plant", "Material"])["Stock on Hand"].to_dict()
+    elif not open_po.empty:
+        stock_lookup = (
+            open_po.dropna(subset=["Stock on Hand"])
+            .groupby(["Plant", "Material"])["Stock on Hand"].first().to_dict()
+        )
+    else:
+        stock_lookup = {}
+
+    open_months = fc_months[:len(OPEN_MONTH_LABELS)]
 
     rows = []
     for plant, material in sorted(keys, key=lambda k: (required_plants.index(k[0]) if k[0] in required_plants else 99, k[1])):
@@ -500,11 +636,19 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
             row[f"H|{label}"] = hist_pivot.get((plant, material, year, month))
         for label, (year, month) in zip(TEMPLATE_MONTH_LABELS, fc_months):
             row[f"F|{label}"] = fc_pivot.get((plant, material, year, month))
+        for label, (year, month) in zip(OPEN_MONTH_LABELS, open_months):
+            row[f"OO|{label}"] = oo_pivot.get((plant, material, year, month))
+        for label, (year, month) in zip(OPEN_MONTH_LABELS, open_months):
+            row[f"PO|{label}"] = po_pivot.get((plant, material, year, month))
+        row["Stock on Hand"] = stock_lookup.get((plant, material))
         rows.append(row)
 
     out = pd.DataFrame(rows)
     if out.empty:
-        cols = TEMPLATE_ID_COLS + [f"H|{l}" for l in TEMPLATE_MONTH_LABELS] + [f"F|{l}" for l in TEMPLATE_MONTH_LABELS]
+        cols = (TEMPLATE_ID_COLS + [f"H|{l}" for l in TEMPLATE_MONTH_LABELS]
+                + [f"F|{l}" for l in TEMPLATE_MONTH_LABELS]
+                + [f"OO|{l}" for l in OPEN_MONTH_LABELS] + [f"PO|{l}" for l in OPEN_MONTH_LABELS]
+                + ["Stock on Hand"])
         return pd.DataFrame(columns=cols)
     return out
 
@@ -716,7 +860,10 @@ def build_monthly_summary(fact: pd.DataFrame, data_as_of: pd.Timestamp) -> pd.Da
 # ---------------------------------------------------------------------------
 def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
                         hist_months: list[tuple[int, int]],
-                        required_plants: list[str] = REQUIRED_PLANTS) -> pd.DataFrame:
+                        required_plants: list[str] = REQUIRED_PLANTS,
+                        open_orders: pd.DataFrame | None = None,
+                        open_po: pd.DataFrame | None = None,
+                        stock_on_hand: pd.DataFrame | None = None) -> pd.DataFrame:
     checks = []
 
     def add(label, value):
@@ -745,6 +892,32 @@ def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
         fc_plants = set(forecast["Plant"].unique()) - set(required_plants)
         if fc_plants:
             add("Forecast rows for plants outside the required 5", ", ".join(sorted(fc_plants)))
+
+    if open_orders is not None and not open_orders.empty:
+        add("Open Orders rows loaded", f"{len(open_orders):,}")
+        unresolved = int((open_orders.get("Plant", "") == "").sum()) if "Plant" in open_orders.columns else len(open_orders)
+        add("Open Orders rows with no matching Sales Order + Material in the "
+            "uploaded sales-order exports (Plant unknown, excluded from "
+            "plant-level Open Orders)", f"{unresolved:,}")
+    else:
+        add("Open Orders rows loaded", "0")
+
+    if open_po is not None and not open_po.empty:
+        add("Open PO rows loaded", f"{len(open_po):,}")
+        po_plants = set(open_po["Plant"].unique()) - set(required_plants)
+        if po_plants:
+            add("Open PO rows for plants outside the required 5", ", ".join(sorted(po_plants)))
+    else:
+        add("Open PO rows loaded", "0")
+
+    if stock_on_hand is not None and not stock_on_hand.empty:
+        add("Stock on Hand rows loaded (dedicated Materials export)", f"{len(stock_on_hand):,}")
+    elif open_po is not None and not open_po.empty and "Stock on Hand" in open_po.columns:
+        add("Stock on Hand source", "Fallback: incidental figure from the Open PO export "
+            "(only covers materials with an open PO) — upload a Materials/inventory "
+            "export for full coverage")
+    else:
+        add("Stock on Hand source", "none uploaded")
 
     return pd.DataFrame(checks)
 
@@ -785,17 +958,41 @@ def generate_excel(main_table: pd.DataFrame, validation: pd.DataFrame,
             if (y, m) == (data_as_of.year, data_as_of.month):
                 hist_labels[i] = hist_labels[i].strip() + " (partial)"
 
+    # Open Orders / Open PO / Stock on Hand — the extended template columns.
+    # main_table always carries these (build_main_table fills them blank
+    # when no Open Orders/Open PO/stock file was supplied), so the layout
+    # here is unconditional and matches "output_needed_with_stock_on_hand".
+    has_open_cols = any(c.startswith(("OO|", "PO|")) or c == "Stock on Hand" for c in main_table.columns)
+    if has_open_cols:
+        open_year = fc_months[0][0]
+        ws.cell(1, 30, f"Open Orders {open_year}").font = bold
+        ws.cell(1, 34, f"Open PO {open_year}").font = bold
+        ws.cell(1, 38, "Stock on Hand").font = bold
+        ws.merge_cells(start_row=1, start_column=30, end_row=1, end_column=33)
+        ws.merge_cells(start_row=1, start_column=34, end_row=1, end_column=37)
+        ws.merge_cells(start_row=1, start_column=38, end_row=2, end_column=38)
+        ws.cell(1, 30).alignment = center
+        ws.cell(1, 34).alignment = center
+        ws.cell(1, 38).alignment = Alignment(horizontal="center", vertical="center")
+
     header = TEMPLATE_ID_COLS + hist_labels + list(TEMPLATE_MONTH_LABELS)
+    if has_open_cols:
+        header += list(OPEN_MONTH_LABELS) + list(OPEN_MONTH_LABELS)
     for c, label in enumerate(header, start=1):
         cell = ws.cell(2, c, label)
         cell.font = bold
 
     hist_cols = [f"H|{l}" for l in TEMPLATE_MONTH_LABELS]
     fc_cols = [f"F|{l}" for l in TEMPLATE_MONTH_LABELS]
+    oo_cols = [f"OO|{l}" for l in OPEN_MONTH_LABELS]
+    po_cols = [f"PO|{l}" for l in OPEN_MONTH_LABELS]
     for r, row_d in enumerate(main_table.to_dict("records"), start=3):
         values = [row_d.get(c) for c in TEMPLATE_ID_COLS] + \
                  [row_d.get(c) for c in hist_cols] + \
                  [row_d.get(c) for c in fc_cols]
+        if has_open_cols:
+            values += [row_d.get(c) for c in oo_cols] + [row_d.get(c) for c in po_cols] \
+                      + [row_d.get("Stock on Hand")]
         for c, v in enumerate(values, start=1):
             is_blank = v is None or (isinstance(v, float) and pd.isna(v))
             ws.cell(r, c, None if is_blank else v)
