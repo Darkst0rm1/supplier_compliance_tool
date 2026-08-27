@@ -379,12 +379,15 @@ def _load_forecast_mrp(df: pd.DataFrame) -> pd.DataFrame:
     out["Material"] = _clean_id(df["Material"])
     out["_date"] = pd.to_datetime(df[date_col], errors="coerce")
     out["Forecast Qty"] = pd.to_numeric(df["Planned qty"], errors="coerce").fillna(0)
-    # This export's "Brand Manager" column holds a person's name (matching
-    # this codebase's BDM convention elsewhere) — used as Buyer Name since
-    # there is no column literally named Buyer in this source.
-    out["Buyer Name"] = df["Brand Manager"].astype(str).str.strip() if "Brand Manager" in df.columns else ""
-    out["Brand Name"] = ""
-    out["Material Description"] = ""
+    # This export's column headers don't describe their own content: "Material
+    # Group" actually holds the brand/supplier grouping text (e.g. "ROBERTSONS"),
+    # "Description" holds the buyer's name (e.g. "Bita Farahani"), and
+    # "Material Number" holds the material's text description — confirmed by
+    # cross-checking against a reference workbook built from this same
+    # source. "Brand Manager" and "BDM" are NOT used here; they don't match.
+    out["Brand Name"] = df["Material Group"].astype(str).str.strip() if "Material Group" in df.columns else ""
+    out["Buyer Name"] = df["Description"].astype(str).str.strip() if "Description" in df.columns else ""
+    out["Material Description"] = df["Material Number"].astype(str).str.strip() if "Material Number" in df.columns else ""
     out = out.dropna(subset=["_date"])
     out["Forecast Year"] = out["_date"].dt.year
     out["Forecast Month"] = out["_date"].dt.month

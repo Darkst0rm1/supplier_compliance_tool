@@ -255,13 +255,22 @@ def test_load_forecast_wide_with_history_section_uses_forecast_columns_only():
 
 
 def test_load_forecast_mrp_shape_aggregates_by_month():
+    """This export's own headers don't describe their content: 'Material
+    Group' actually holds the brand/supplier grouping text, 'Description'
+    holds the buyer's name, and 'Material Number' holds the material's text
+    description -- confirmed against a real reference workbook built from
+    this same source. 'Brand Manager' is a red herring and must NOT be used."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sheet1"
-    ws.append(["Material", "Plnt", "Del/finish", "Planned qty", "Brand Manager"])
-    ws.append(["10026930", "2910", datetime(2026, 9, 3), 100, "ANABELA NEVES PR"])
-    ws.append(["10026930", "2910", datetime(2026, 9, 20), 50, "ANABELA NEVES PR"])
-    ws.append(["10026930", "2910", datetime(2026, 10, 1), 30, "ANABELA NEVES PR"])
+    ws.append(["Material", "Material Number", "Plnt", "Material Group", "Description",
+               "Brand Manager", "Del/finish", "Planned qty"])
+    ws.append(["10026930", "TINKYA ELBOW BROWN 454G", "2910", "ROBERTSONS", "Bita Farahani",
+               "SOMEONE ELSE", datetime(2026, 9, 3), 100])
+    ws.append(["10026930", "TINKYA ELBOW BROWN 454G", "2910", "ROBERTSONS", "Bita Farahani",
+               "SOMEONE ELSE", datetime(2026, 9, 20), 50])
+    ws.append(["10026930", "TINKYA ELBOW BROWN 454G", "2910", "ROBERTSONS", "Bita Farahani",
+               "SOMEONE ELSE", datetime(2026, 10, 1), 30])
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -269,7 +278,9 @@ def test_load_forecast_mrp_shape_aggregates_by_month():
     df = load_forecast(buf, [(2026, 9), (2026, 10)])
     sept = df[(df["Forecast Year"] == 2026) & (df["Forecast Month"] == 9)].iloc[0]
     assert sept["Forecast Qty"] == 150
-    assert sept["Buyer Name"] == "ANABELA NEVES PR"
+    assert sept["Brand Name"] == "ROBERTSONS"
+    assert sept["Buyer Name"] == "Bita Farahani"
+    assert sept["Material Description"] == "TINKYA ELBOW BROWN 454G"
     oct_ = df[(df["Forecast Year"] == 2026) & (df["Forecast Month"] == 10)].iloc[0]
     assert oct_["Forecast Qty"] == 30
 
