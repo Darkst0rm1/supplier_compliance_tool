@@ -646,17 +646,27 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
         keys |= set(zip(open_po["Plant"], open_po["Material"]))
     keys = {(p, m) for p, m in keys if p in required_plants and m}
 
+    # Description, Brand, and Buyer are Material-level master data — who
+    # manages a SKU and what brand it belongs to doesn't change by plant.
+    # A source that only lists a material once (e.g. the forecast file
+    # covers each material at just one representative plant even though
+    # it's sold at several) must still apply everywhere that material shows
+    # up — keyed by Plant+Material here, a plant with no forecast row of
+    # its own for that material would wrongly show a blank Brand/Buyer even
+    # though the same file has the answer one row away. Confirmed against
+    # the reference workbook: the same material carries identical Brand/
+    # Buyer across every plant it appears at.
     desc_lookup = (
         plant_fact.sort_values("Order Date")
-        .groupby(["Plant", "Material"])["Material Description"]
+        .groupby("Material")["Material Description"]
         .agg(_first_nonblank)
     )
     if not forecast.empty and "Material Description" in forecast.columns:
-        fc_desc = forecast.groupby(["Plant", "Material"])["Material Description"].agg(_first_nonblank)
+        fc_desc = forecast.groupby("Material")["Material Description"].agg(_first_nonblank)
     else:
         fc_desc = pd.Series(dtype=str)
-    buyer_lookup = forecast.groupby(["Plant", "Material"])["Buyer Name"].agg(_first_nonblank) if not forecast.empty else pd.Series(dtype=str)
-    brand_lookup = forecast.groupby(["Plant", "Material"])["Brand Name"].agg(_first_nonblank) if not forecast.empty else pd.Series(dtype=str)
+    buyer_lookup = forecast.groupby("Material")["Buyer Name"].agg(_first_nonblank) if not forecast.empty else pd.Series(dtype=str)
+    brand_lookup = forecast.groupby("Material")["Brand Name"].agg(_first_nonblank) if not forecast.empty else pd.Series(dtype=str)
 
     hist_pivot = _qty_pivot(plant_fact, ["Plant", "Material", "Year", "Month"], "Invoice Qty")
     fc_pivot = _qty_pivot(forecast, ["Plant", "Material", "Forecast Year", "Forecast Month"], "Forecast Qty")
@@ -678,13 +688,13 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
 
     rows = []
     for plant, material in sorted(keys, key=lambda k: (required_plants.index(k[0]) if k[0] in required_plants else 99, k[1])):
-        desc = desc_lookup.get((plant, material), "") or fc_desc.get((plant, material), "")
+        desc = desc_lookup.get(material, "") or fc_desc.get(material, "")
         row = {
             "Plant": int(plant) if str(plant).isdigit() else plant,
             "Mat #": material,
             "Desc": desc,
-            "Brand name": brand_lookup.get((plant, material), ""),
-            "Buyer name": buyer_lookup.get((plant, material), ""),
+            "Brand name": brand_lookup.get(material, ""),
+            "Buyer name": buyer_lookup.get(material, ""),
         }
         for label, (year, month) in zip(TEMPLATE_MONTH_LABELS, hist_months):
             row[f"H|{label}"] = hist_pivot.get((plant, material, year, month))
@@ -759,7 +769,8 @@ def build_forecast_validation(fact: pd.DataFrame, forecast: pd.DataFrame,
     order_pivot = _qty_pivot(plant_fact, ["Plant", "Material", "Year", "Month"], "Order Qty")
     invoice_pivot = _qty_pivot(plant_fact, ["Plant", "Material", "Year", "Month"], "Invoice Qty")
     fc_pivot = _qty_pivot(forecast, ["Plant", "Material", "Forecast Year", "Forecast Month"], "Forecast Qty")
-    desc_lookup = plant_fact.groupby(["Plant", "Material"])["Material Description"].agg(_first_nonblank)
+    # Material-level, not Plant+Material — see build_main_table for why.
+    desc_lookup = plant_fact.groupby("Material")["Material Description"].agg(_first_nonblank)
 
     rows = []
     keys = set(zip(plant_fact["Plant"], plant_fact["Material"]))
@@ -779,7 +790,7 @@ def build_forecast_validation(fact: pd.DataFrame, forecast: pd.DataFrame,
         else:
             growth_factor, factor_source = None, "NO AUGUST BASE"
 
-        desc = desc_lookup.get((plant, material), "")
+        desc = desc_lookup.get(material, "")
 
         for label, (year, month) in zip(TEMPLATE_MONTH_LABELS, fc_months):
             prior_year, prior_month = year - 1, month

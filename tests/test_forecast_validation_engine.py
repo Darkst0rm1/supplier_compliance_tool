@@ -378,6 +378,34 @@ def test_build_main_table_includes_forecast_only_material():
     assert new_row["Desc"] == "BRAND NEW ITEM"
 
 
+def test_build_main_table_brand_buyer_apply_across_plants_for_same_material():
+    """A material sold at two plants but only listed once in the forecast
+    file (real SAP MRP exports often plan each material at one
+    representative plant) must carry that Brand/Buyer to BOTH plant rows --
+    who manages a SKU doesn't change by warehouse. Confirmed against a
+    reference workbook: same material, same Brand/Buyer at every plant."""
+    rows = [
+        _plant_row(**{"Sales Order": "S1", "Plant": "2910", "Plant Name": "TOL Mississauga",
+                       "Creation Date": datetime(2026, 8, 2),
+                       "Order Quantity (CS)": 10, "Invoice Quantity (CS)": 10}),
+        _plant_row(**{"Sales Order": "S2", "Plant": "2930", "Plant Name": "TOL Surrey",
+                       "Creation Date": datetime(2026, 8, 2),
+                       "Order Quantity (CS)": 5, "Invoice Quantity (CS)": 5}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, rows))])
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    # Forecast file only has an entry for the 2930 side of this material.
+    forecast = pd.DataFrame([{
+        "Plant": "2930", "Material": "10026930", "Forecast Year": 2026,
+        "Forecast Month": 9, "Forecast Qty": 100, "Buyer Name": "Bita Farahani",
+        "Brand Name": "ROBERTSONS", "Material Description": "",
+    }])
+    table = build_main_table(fact, forecast, hist, fc)
+    row_2910 = table[(table["Plant"] == 2910) & (table["Mat #"] == "10026930")].iloc[0]
+    assert row_2910["Brand name"] == "ROBERTSONS"
+    assert row_2910["Buyer name"] == "Bita Farahani"
+
+
 # ---------------------------------------------------------------------------
 # build_forecast_validation
 # ---------------------------------------------------------------------------
