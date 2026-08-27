@@ -35,7 +35,6 @@ from src.forecast_validation_engine import (
     load_open_orders,
     load_open_po,
     load_sales_orders,
-    load_stock_on_hand,
     resolve_open_order_plants,
 )
 
@@ -61,10 +60,10 @@ st.title("Forecast Validation")
 st.caption(
     "Upload the raw SAP Sales Order exports (Aug-Dec 2025, 2026 months as you "
     "have them — any mix of the Key Account # or Plant column layout) and, "
-    "optionally, your current forecast, Open Orders, Open PO, and Materials/"
-    "stock files. Order Quantity is current demand; Invoice Quantity is what "
-    "has actually invoiced — shown separately because open 2026 orders may "
-    "not be invoiced yet."
+    "optionally, your current forecast, Open Orders, and Open PO files. "
+    "Order Quantity is current demand; Invoice Quantity is what has actually "
+    "invoiced — shown separately because open 2026 orders may not be "
+    "invoiced yet."
 )
 
 col_so, col_fc = st.columns(2)
@@ -84,7 +83,7 @@ with col_fc:
     )
 
 st.markdown("**Optional — near-term supply/demand visibility**")
-col_oo, col_po, col_stock = st.columns(3)
+col_oo, col_po = st.columns(2)
 with col_oo:
     oo_file = st.file_uploader(
         "3. Open Orders (.xlsx) — optional", type=["xlsx"], key="fv_oo",
@@ -100,17 +99,11 @@ with col_oo:
 with col_po:
     po_file = st.file_uploader(
         "4. Open PO (.xlsx) — optional", type=["xlsx"], key="fv_po",
-        help="Inbound purchase orders not yet received (Plant, Material, Delivery Date, PO Quantity).",
-    )
-with col_stock:
-    stock_file = st.file_uploader(
-        "5. Materials / Stock on Hand (.xlsx) — optional", type=["xlsx"], key="fv_stock",
         help=(
-            "The same Materials inventory export used on the Overstock and "
-            "Risky Inventory pages (Plant, Material, Unrestricted Stock). "
-            "Preferred, more complete Stock on Hand source — without it, "
-            "Stock on Hand falls back to the incidental figure in the Open "
-            "PO export, which only covers materials with an open PO."
+            "Inbound purchase orders not yet received (Plant, Material, "
+            "Delivery Date, PO Quantity). Stock on Hand also comes from "
+            "this file's own Stock on Hand column — only covers materials "
+            "that have an open PO."
         ),
     )
 
@@ -124,7 +117,7 @@ if not st.button("Process files", type="primary"):
 
 @st.cache_data(show_spinner=False)
 def _process(so_bytes: tuple[bytes, ...], fc_bytes: bytes | None,
-             oo_bytes: bytes | None, po_bytes: bytes | None, stock_bytes: bytes | None):
+             oo_bytes: bytes | None, po_bytes: bytes | None):
     dfs = [load_sales_orders(io.BytesIO(b)) for b in so_bytes]
     fact = combine_sales_orders(dfs)
     if fact.empty:
@@ -144,20 +137,19 @@ def _process(so_bytes: tuple[bytes, ...], fc_bytes: bytes | None,
     else:
         open_orders = pd.DataFrame(columns=["Sales Order", "Material", "Plant", "Year", "Month", "Open Order Qty"])
 
+    # Stock on Hand comes from this file's own Stock on Hand column -- no
+    # separate dedicated stock/inventory source.
     open_po = load_open_po(io.BytesIO(po_bytes)) if po_bytes is not None else \
         pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open PO Qty", "Stock on Hand"])
 
-    stock_on_hand = load_stock_on_hand(io.BytesIO(stock_bytes)) if stock_bytes is not None else \
-        pd.DataFrame(columns=["Plant", "Material", "Stock on Hand"])
-
     main_table = build_main_table(fact, forecast, hist_months, fc_months,
-                                   open_orders=open_orders, open_po=open_po, stock_on_hand=stock_on_hand)
+                                   open_orders=open_orders, open_po=open_po)
     validation = build_forecast_validation(fact, forecast, fc_months, data_as_of)
     plant_summary = build_plant_summary(fact, data_as_of)
     item_detail = build_item_detail(fact)
     monthly_summary = build_monthly_summary(fact, data_as_of)
     data_quality = build_data_quality(fact, forecast, hist_months,
-                                       open_orders=open_orders, open_po=open_po, stock_on_hand=stock_on_hand)
+                                       open_orders=open_orders, open_po=open_po)
 
     xlsx = generate_excel(main_table, validation, plant_summary, item_detail,
                            monthly_summary, data_quality, hist_months, fc_months, data_as_of)
@@ -168,7 +160,7 @@ def _process(so_bytes: tuple[bytes, ...], fc_bytes: bytes | None,
         "item_detail": item_detail, "monthly_summary": monthly_summary,
         "data_quality": data_quality, "hist_months": hist_months,
         "fc_months": fc_months, "data_as_of": data_as_of, "xlsx": xlsx,
-        "open_orders": open_orders, "open_po": open_po, "stock_on_hand": stock_on_hand,
+        "open_orders": open_orders, "open_po": open_po,
     }
 
 
@@ -179,7 +171,6 @@ with st.spinner("Combining sales order exports and validating the forecast..."):
             fc_file.getvalue() if fc_file is not None else None,
             oo_file.getvalue() if oo_file is not None else None,
             po_file.getvalue() if po_file is not None else None,
-            stock_file.getvalue() if stock_file is not None else None,
         )
     except ForecastValidationError as exc:
         st.error(str(exc))

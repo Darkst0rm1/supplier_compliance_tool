@@ -448,10 +448,9 @@ def resolve_open_order_plants(open_orders: pd.DataFrame, fact: pd.DataFrame) -> 
 
 def load_open_po(file) -> pd.DataFrame:
     """Read the Open PO export — inbound purchase orders not yet received,
-    by Plant + Material + expected Delivery month. Also carries an
-    incidental Stock on Hand snapshot per Plant + Material, used as a
-    fallback Stock on Hand source when no dedicated Materials/inventory
-    export is uploaded."""
+    by Plant + Material + expected Delivery month. This file's own Stock on
+    Hand column is also the Stock on Hand source for the main sheet — there
+    is no separate dedicated stock/inventory export."""
     df = pd.read_excel(file, sheet_name=0)
     missing = [c for c in OPEN_PO_REQUIRED if c not in df.columns]
     if missing:
@@ -470,27 +469,6 @@ def load_open_po(file) -> pd.DataFrame:
     out["Year"] = out["Delivery Date"].dt.year
     out["Month"] = out["Delivery Date"].dt.month
     return out
-
-
-def load_stock_on_hand(file) -> pd.DataFrame:
-    """Read a dedicated Materials/inventory export (the same shape the
-    Overstock and Risky Inventory pages already use) and reduce it to one
-    Unrestricted Stock total per Plant + Material — the authoritative Stock
-    on Hand source when uploaded, preferred over the incidental figure
-    carried in the Open PO export."""
-    df = pd.read_excel(file, sheet_name=0)
-    required = ["Plant", "Material", "Unrestricted Stock"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ForecastValidationError(
-            f"Materials/Stock export is missing required column(s): {', '.join(missing)}. "
-            f"Found columns: {', '.join(df.columns)}"
-        )
-    out = pd.DataFrame()
-    out["Plant"] = _clean_id(df["Plant"])
-    out["Material"] = _clean_id(df["Material"])
-    out["Stock on Hand"] = pd.to_numeric(df["Unrestricted Stock"], errors="coerce").fillna(0)
-    return out.groupby(["Plant", "Material"], as_index=False)["Stock on Hand"].sum()
 
 
 # ---------------------------------------------------------------------------
@@ -564,20 +542,19 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
                       fc_months: list[tuple[int, int]],
                       required_plants: list[str] = REQUIRED_PLANTS,
                       open_orders: pd.DataFrame | None = None,
-                      open_po: pd.DataFrame | None = None,
-                      stock_on_hand: pd.DataFrame | None = None) -> pd.DataFrame:
+                      open_po: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build the main sheet in the exact required layout: Plant, Mat #, Desc,
     Brand name, Buyer name, then 12 history (actual Invoice Qty) columns,
     12 forecast columns, then — when supplied — Open Orders and Open PO for
     the first 4 forecast months and one Stock on Hand column, matching the
-    extended "output_needed_with_stock_on_hand" template. One row per Plant +
-    Material actually observed anywhere (sales history, forecast, open
-    orders, open PO, or stock) — a brand-new item with only an open PO still
-    shows up."""
+    extended "output_needed_with_stock_on_hand" template. Stock on Hand
+    comes from the Open PO export's own Stock on Hand column — there is no
+    separate stock/inventory source. One row per Plant + Material actually
+    observed anywhere (sales history, forecast, open orders, or open PO) —
+    a brand-new item with only an open PO still shows up."""
     plant_fact = fact[fact["Plant"].isin(required_plants) & (fact["Material"] != "")]
     open_orders = open_orders if open_orders is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open Order Qty"])
     open_po = open_po if open_po is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open PO Qty", "Stock on Hand"])
-    stock_on_hand = stock_on_hand if stock_on_hand is not None else pd.DataFrame(columns=["Plant", "Material", "Stock on Hand"])
 
     keys = set(zip(plant_fact["Plant"], plant_fact["Material"]))
     if not forecast.empty:
@@ -586,8 +563,6 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
         keys |= set(zip(open_orders["Plant"], open_orders["Material"]))
     if not open_po.empty:
         keys |= set(zip(open_po["Plant"], open_po["Material"]))
-    if not stock_on_hand.empty:
-        keys |= set(zip(stock_on_hand["Plant"], stock_on_hand["Material"]))
     keys = {(p, m) for p, m in keys if p in required_plants and m}
 
     desc_lookup = (
@@ -607,12 +582,10 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
     oo_pivot = _qty_pivot(open_orders, ["Plant", "Material", "Year", "Month"], "Open Order Qty")
     po_pivot = _qty_pivot(open_po, ["Plant", "Material", "Year", "Month"], "Open PO Qty")
 
-    # Stock on Hand: prefer the dedicated Materials/inventory export when
-    # supplied (authoritative); otherwise fall back to the incidental figure
-    # carried in the Open PO export (only covers materials with an open PO).
-    if not stock_on_hand.empty:
-        stock_lookup = stock_on_hand.set_index(["Plant", "Material"])["Stock on Hand"].to_dict()
-    elif not open_po.empty:
+    # Stock on Hand comes from the Open PO export's own column — only covers
+    # materials that appear there (an open PO), which matches what's
+    # actually available; nothing is fabricated for the rest.
+    if not open_po.empty and "Stock on Hand" in open_po.columns:
         stock_lookup = (
             open_po.dropna(subset=["Stock on Hand"])
             .groupby(["Plant", "Material"])["Stock on Hand"].first().to_dict()
@@ -862,8 +835,7 @@ def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
                         hist_months: list[tuple[int, int]],
                         required_plants: list[str] = REQUIRED_PLANTS,
                         open_orders: pd.DataFrame | None = None,
-                        open_po: pd.DataFrame | None = None,
-                        stock_on_hand: pd.DataFrame | None = None) -> pd.DataFrame:
+                        open_po: pd.DataFrame | None = None) -> pd.DataFrame:
     checks = []
 
     def add(label, value):
@@ -910,12 +882,10 @@ def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
     else:
         add("Open PO rows loaded", "0")
 
-    if stock_on_hand is not None and not stock_on_hand.empty:
-        add("Stock on Hand rows loaded (dedicated Materials export)", f"{len(stock_on_hand):,}")
-    elif open_po is not None and not open_po.empty and "Stock on Hand" in open_po.columns:
-        add("Stock on Hand source", "Fallback: incidental figure from the Open PO export "
-            "(only covers materials with an open PO) — upload a Materials/inventory "
-            "export for full coverage")
+    if open_po is not None and not open_po.empty and "Stock on Hand" in open_po.columns:
+        covered = int(open_po["Stock on Hand"].notna().groupby([open_po["Plant"], open_po["Material"]]).any().sum())
+        add("Stock on Hand rows loaded (from the Open PO export)",
+            f"{covered:,} distinct Plant + Material — only covers materials with an open PO")
     else:
         add("Stock on Hand source", "none uploaded")
 

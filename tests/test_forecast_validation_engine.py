@@ -25,7 +25,6 @@ from src.forecast_validation_engine import (
     load_open_orders,
     load_open_po,
     load_sales_orders,
-    load_stock_on_hand,
     resolve_open_order_plants,
     same_period_window,
 )
@@ -580,31 +579,12 @@ def test_load_open_po_missing_required_column_raises():
                                            "2930", "10078019", "D", 0, 816.0, None, "B"]]))
 
 
-def test_load_stock_on_hand_sums_across_batches():
-    headers = ["Material Group Name", "Material", "Material Description", "Plant", "Plant Name",
-               "Batch", "Storage Location", "Shelf Life Expiration Date", "Unrestricted Stock",
-               "Production Date"]
-    rows = [
-        ["AGROPUR", "10019604", "OKA CHEESE", "2910", "TOL Mississauga", "B1", "1100",
-         datetime(2026, 8, 19), 6, datetime(2026, 5, 21)],
-        ["AGROPUR", "10019604", "OKA CHEESE", "2910", "TOL Mississauga", "B2", "1100",
-         datetime(2026, 8, 19), 4, datetime(2026, 5, 21)],
-    ]
-    df = load_stock_on_hand(_xlsx(headers, rows, sheet="SAPUI5 Export"))
-    row = df[(df["Plant"] == "2910") & (df["Material"] == "10019604")].iloc[0]
-    assert row["Stock on Hand"] == 10  # two batches summed
-
-
-def test_load_stock_on_hand_missing_required_column_raises():
-    headers = ["Material", "Plant"]
-    with pytest.raises(ForecastValidationError):
-        load_stock_on_hand(_xlsx(headers, [["10019604", "2910"]], sheet="SAPUI5 Export"))
-
-
 # ---------------------------------------------------------------------------
 # build_main_table with Open Orders / Open PO / Stock on Hand
 # ---------------------------------------------------------------------------
 def test_build_main_table_includes_open_orders_po_and_stock():
+    """Stock on Hand comes only from the Open PO export's own column --
+    there is no separate dedicated stock/inventory source."""
     fact = _fact_two_years()
     hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
     empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
@@ -616,28 +596,11 @@ def test_build_main_table_includes_open_orders_po_and_stock():
         "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9,
         "Open PO Qty": 100, "Stock on Hand": 7,
     }])
-    stock = pd.DataFrame([{"Plant": "2910", "Material": "10026930", "Stock on Hand": 250}])
 
-    table = build_main_table(fact, empty_forecast, hist, fc,
-                              open_orders=open_orders, open_po=open_po, stock_on_hand=stock)
+    table = build_main_table(fact, empty_forecast, hist, fc, open_orders=open_orders, open_po=open_po)
     row = table[table["Mat #"] == "10026930"].iloc[0]
     assert row["OO|Sept"] == 42
     assert row["PO|Sept"] == 100
-    # dedicated Stock on Hand export (250) takes priority over the Open PO
-    # file's incidental figure (7)
-    assert row["Stock on Hand"] == 250
-
-
-def test_build_main_table_stock_on_hand_falls_back_to_open_po_when_no_dedicated_export():
-    fact = _fact_two_years()
-    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
-    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
-    open_po = pd.DataFrame([{
-        "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9,
-        "Open PO Qty": 100, "Stock on Hand": 7,
-    }])
-    table = build_main_table(fact, empty_forecast, hist, fc, open_po=open_po)
-    row = table[table["Mat #"] == "10026930"].iloc[0]
     assert row["Stock on Hand"] == 7
 
 
