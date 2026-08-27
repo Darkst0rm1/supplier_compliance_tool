@@ -190,12 +190,30 @@ def test_default_history_and_forecast_months():
     assert len(fc) == 12
 
 
-def test_default_history_and_forecast_months_year_boundary():
+def test_default_history_and_forecast_months_mid_fiscal_year():
+    """Jan 2026 is still inside the Sept 2025-Aug 2026 fiscal year -- the
+    window is anchored to that fixed fiscal year, not a 12-months-back
+    rolling window from today."""
     hist, fc = default_history_and_forecast_months(date(2026, 1, 15))
-    assert hist[0] == (2025, 2)
-    assert hist[-1] == (2026, 1)
-    assert fc[0] == (2026, 2)
-    assert fc[-1] == (2027, 1)
+    assert hist[0] == (2025, 9)
+    assert hist[-1] == (2026, 8)
+    assert fc[0] == (2026, 9)
+    assert fc[-1] == (2027, 8)
+
+
+def test_default_history_and_forecast_months_same_fiscal_year_regardless_of_month():
+    """The bug this guards against: data ending in December must produce
+    the SAME Sept-Aug window as data ending in August (both fall in the
+    Sept 2025-Aug 2026 fiscal year) -- a rolling window would instead shift
+    the whole 12-month span, silently mislabeling every column against the
+    template's fixed Sept...Aug headers."""
+    hist_dec, fc_dec = default_history_and_forecast_months(date(2025, 12, 31))
+    hist_aug, fc_aug = default_history_and_forecast_months(date(2026, 8, 27))
+    assert hist_dec == hist_aug == [
+        (2025, 9), (2025, 10), (2025, 11), (2025, 12), (2026, 1), (2026, 2),
+        (2026, 3), (2026, 4), (2026, 5), (2026, 6), (2026, 7), (2026, 8),
+    ]
+    assert fc_dec == fc_aug
 
 
 def test_same_period_window_no_platform_crash():

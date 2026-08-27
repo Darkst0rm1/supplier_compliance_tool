@@ -483,13 +483,22 @@ def _add_months(year: int, month: int, n: int) -> tuple[int, int]:
 
 
 def default_history_and_forecast_months(today: date) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    """History = the 12 months ending with the current month (the current
-    month itself will usually be partial); Forecast = the 12 months
-    starting the month after."""
-    hist_end = (today.year, today.month)
-    hist_months = [_add_months(*hist_end, -n) for n in range(11, -1, -1)]
-    fc_start = _add_months(*hist_end, 1)
-    fc_months = [_add_months(*fc_start, n) for n in range(12)]
+    """History = Sept-Aug of the fiscal year `today` falls in (partial once
+    it reaches the current month); Forecast = the next fiscal year's Sept-Aug.
+
+    Anchored to a fixed September start, NOT a rolling "12 months back from
+    today" window -- the required template's row-2 labels are the fixed
+    sequence Sept, Oct, Nov, Dec, Jan, ... Aug (this business's actual
+    season, tied to Christmas import buying starting in the fall), and
+    those labels are matched to hist_months/fc_months purely by position in
+    generate_excel. A rolling window whose first month isn't September
+    would silently mislabel every column whenever `today` isn't in August
+    (e.g. history ending in December would read Jan-Dec under "Sept...Aug"
+    headers) -- this happened in production and is exactly the bug this
+    anchoring fixes."""
+    fiscal_start_year = today.year if today.month >= 9 else today.year - 1
+    hist_months = [_add_months(fiscal_start_year, 9, n) for n in range(12)]
+    fc_months = [_add_months(fiscal_start_year, 9, n) for n in range(12, 24)]
     return hist_months, fc_months
 
 
