@@ -598,6 +598,30 @@ def test_load_open_orders_uses_plant_column_directly_when_present():
     assert df.iloc[0]["Plant"] == "2920"
 
 
+def test_load_open_orders_accepts_alternate_column_headers():
+    """A re-pull of this report with different fields selected changes
+    header text without changing what the column means -- 'Order Quantity'
+    (no CS suffix) and 'TOL Material Description' are real variants seen in
+    production, not hypothetical."""
+    headers = ["Plant", "Creation Date", "Sales Order", "Sales Order Type Desc.", "Material",
+               "TOL Material Description", "Order Quantity", "Invoice Quantity (CS)",
+               "Requested Delivery Date", "Ship to Arrive Date", "Sold To Name",
+               "Material Group Description", "Vendor", "Vendor Name", "BDM Description",
+               "CDM Name", "Purchasing Group", "Purchasing Group Name"]
+    rows = [
+        ["2910", datetime(2026, 2, 23), "83421", "Movista Order", "10038145",
+         "SCHAR PANETTONE GF", 2, 0, datetime(2026, 10, 20), None,
+         "LA ROSE ITALIAN BAKERY & DELI", "SCHAR", "60043816", "DR SCHAR USA, INC.",
+         "MICHELLE JEWELL NT", "Brandon Fuselli", "170", "Anabel Lopez"],
+    ]
+    df = load_open_orders(_xlsx(headers, rows, sheet="SAPUI5 Export"))
+    row = df.iloc[0]
+    assert row["Plant"] == "2910"
+    assert row["Material"] == "10038145"
+    assert row["Open Order Qty"] == 2
+    assert row["Material Description"] == "SCHAR PANETTONE GF"
+
+
 def test_resolve_open_order_plants_never_overwrites_a_plant_already_present():
     fact_rows = [_plant_row(**{"Sales Order": "1001", "Material": "10026930", "Plant": "2910"})]
     fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, fact_rows))])

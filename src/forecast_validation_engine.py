@@ -406,6 +406,15 @@ def _load_forecast_mrp(df: pd.DataFrame) -> pd.DataFrame:
 OPEN_ORDERS_REQUIRED = ["Sales Order", "Material", "Requested Delivery Date", "Order Quantity (CS)"]
 OPEN_PO_REQUIRED = ["Plant", "Material", "Delivery Date", "PO Quantity"]
 
+# Re-pulling this report from SAP with different fields selected changes the
+# header text without changing what the column means (the same pattern as
+# the Sales Order export's Key Account #/Plant variants) — normalize known
+# variants to the canonical name before checking required columns.
+OPEN_ORDERS_COLUMN_ALIASES = {
+    "Order Quantity": "Order Quantity (CS)",
+    "TOL Material Description": "Material Description",
+}
+
 
 def load_open_orders(file) -> pd.DataFrame:
     """Read the Open Orders export — sales orders already booked (Creation
@@ -421,6 +430,7 @@ def load_open_orders(file) -> pd.DataFrame:
     already has, with its Key Account #/Plant variants), it's read directly
     here and skips that unreliable join entirely."""
     df = pd.read_excel(file, sheet_name=0)
+    df = df.rename(columns={k: v for k, v in OPEN_ORDERS_COLUMN_ALIASES.items() if k in df.columns})
     missing = [c for c in OPEN_ORDERS_REQUIRED if c not in df.columns]
     if missing:
         raise ForecastValidationError(
@@ -434,6 +444,7 @@ def load_open_orders(file) -> pd.DataFrame:
     out["Requested Delivery Date"] = pd.to_datetime(df["Requested Delivery Date"], errors="coerce")
     out["Open Order Qty"] = pd.to_numeric(df["Order Quantity (CS)"], errors="coerce").fillna(0)
     out["Buyer Name"] = df["BDM Description"].astype(str).str.strip() if "BDM Description" in df.columns else ""
+    out["Material Description"] = df["Material Description"].astype(str).str.strip() if "Material Description" in df.columns else ""
     plant_col = next((c for c in ("Plant", "Plnt") if c in df.columns), None)
     out["Plant"] = _clean_id(df[plant_col]) if plant_col else ""
     out = out.dropna(subset=["Requested Delivery Date"])
