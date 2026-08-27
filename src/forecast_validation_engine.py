@@ -453,6 +453,17 @@ def load_open_orders(file) -> pd.DataFrame:
     return out
 
 
+def aggregate_open_orders_by_material(open_orders: pd.DataFrame) -> pd.DataFrame:
+    """Material + Month totals — the ONLY safe source for an Open Orders
+    KPI/total. build_main_table repeats each material's Open Order Qty on
+    every plant row that material appears on (see its docstring); summing
+    that display column instead would multiply-count the same order once
+    per plant it's shown on."""
+    if open_orders.empty:
+        return pd.DataFrame(columns=["Material", "Year", "Month", "Open Order Qty"])
+    return open_orders.groupby(["Material", "Year", "Month"], as_index=False)["Open Order Qty"].sum()
+
+
 def resolve_open_order_plants(open_orders: pd.DataFrame, fact: pd.DataFrame) -> pd.DataFrame:
     """Fill in Plant for any Open Orders row that doesn't already have one.
 
@@ -630,20 +641,29 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
     the first 4 forecast months and one Stock on Hand column, matching the
     extended "output_needed_with_stock_on_hand" template. Stock on Hand
     comes from the Open PO export's own Stock on Hand column — there is no
-    separate stock/inventory source. One row per Plant + Material actually
-    observed anywhere (sales history, forecast, open orders, or open PO) —
-    a brand-new item with only an open PO still shows up."""
+    separate stock/inventory source.
+
+    The master row list is the forecast file's own (Plant, Material) pairs
+    — NOT a union with sales history / open orders / open PO. Confirmed
+    against the reference workbook: a material sold at a plant with no
+    forecast entry of its own is simply absent from that plant's row there,
+    even though it has real sales history — the output tracks the active
+    forecast/template population, not everywhere something has ever sold.
+    With no forecast file uploaded, this is empty (blank forecast columns
+    mean nothing to build rows from — see the page's PASTE FORECAST notice).
+
+    Open Orders is Material + Month only, never Plant — the export has no
+    reliable Plant of its own (see load_open_orders), so the SAME
+    material-level total is repeated on every plant row for that material.
+    This means an Open Orders total must come from
+    aggregate_open_orders_by_material(), never from summing this column,
+    which would multiply-count the same order across every plant it's
+    repeated on."""
     plant_fact = fact[fact["Plant"].isin(required_plants) & (fact["Material"] != "")]
     open_orders = open_orders if open_orders is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open Order Qty"])
     open_po = open_po if open_po is not None else pd.DataFrame(columns=["Plant", "Material", "Year", "Month", "Open PO Qty", "Stock on Hand"])
 
-    keys = set(zip(plant_fact["Plant"], plant_fact["Material"]))
-    if not forecast.empty:
-        keys |= set(zip(forecast["Plant"], forecast["Material"]))
-    if not open_orders.empty:
-        keys |= set(zip(open_orders["Plant"], open_orders["Material"]))
-    if not open_po.empty:
-        keys |= set(zip(open_po["Plant"], open_po["Material"]))
+    keys = set(zip(forecast["Plant"], forecast["Material"])) if not forecast.empty else set()
     keys = {(p, m) for p, m in keys if p in required_plants and m}
 
     # Description, Brand, and Buyer are Material-level master data — who
@@ -670,7 +690,7 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
 
     hist_pivot = _qty_pivot(plant_fact, ["Plant", "Material", "Year", "Month"], "Invoice Qty")
     fc_pivot = _qty_pivot(forecast, ["Plant", "Material", "Forecast Year", "Forecast Month"], "Forecast Qty")
-    oo_pivot = _qty_pivot(open_orders, ["Plant", "Material", "Year", "Month"], "Open Order Qty")
+    oo_pivot = _qty_pivot(open_orders, ["Material", "Year", "Month"], "Open Order Qty")
     po_pivot = _qty_pivot(open_po, ["Plant", "Material", "Year", "Month"], "Open PO Qty")
 
     # Stock on Hand comes from the Open PO export's own column — only covers
@@ -701,7 +721,7 @@ def build_main_table(fact: pd.DataFrame, forecast: pd.DataFrame,
         for label, (year, month) in zip(TEMPLATE_MONTH_LABELS, fc_months):
             row[f"F|{label}"] = fc_pivot.get((plant, material, year, month))
         for label, (year, month) in zip(OPEN_MONTH_LABELS, open_months):
-            row[f"OO|{label}"] = oo_pivot.get((plant, material, year, month))
+            row[f"OO|{label}"] = oo_pivot.get((material, year, month))
         for label, (year, month) in zip(OPEN_MONTH_LABELS, open_months):
             row[f"PO|{label}"] = po_pivot.get((plant, material, year, month))
         row["Stock on Hand"] = stock_lookup.get((plant, material))
@@ -961,13 +981,20 @@ def build_data_quality(fact: pd.DataFrame, forecast: pd.DataFrame,
 
     if open_orders is not None and not open_orders.empty:
         add("Open Orders rows loaded", f"{len(open_orders):,}")
-        unresolved = int((open_orders.get("Plant", "") == "").sum()) if "Plant" in open_orders.columns else len(open_orders)
-        add("Open Orders rows with Plant still unknown (no Plant column in "
-            "the export, no matching Sales Order + Material in the "
-            "uploaded sales-order exports, and the material sits at more "
-            "than one plant) — excluded from plant-level Open Orders. "
-            "Re-pull the Open Orders report from SAP with Plant added as a "
-            "column to fix this directly", f"{unresolved:,} of {len(open_orders):,}")
+        # Open Orders is summed by Material + Month only (see build_main_table
+        # — the reference output repeats the same figure across every plant a
+        # material is forecast-planned for, rather than splitting it), so
+        # Plant is not needed here. What DOES matter is whether a material
+        # even has a forecast entry to attach to — one that doesn't never
+        # appears on the main sheet at all.
+        if forecast is not None and not forecast.empty:
+            oo_materials = set(open_orders["Material"].unique())
+            fc_materials = set(forecast["Material"].unique())
+            uncovered = oo_materials - fc_materials
+            if uncovered:
+                add("Open Orders materials with no forecast entry (won't "
+                    "appear on the main sheet — it's driven by the forecast "
+                    "file's material list)", f"{len(uncovered):,} of {len(oo_materials):,}")
     else:
         add("Open Orders rows loaded", "0")
 
@@ -1084,3 +1111,152 @@ def generate_excel(main_table: pd.DataFrame, validation: pd.DataFrame,
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Reference comparison (development/debug tool)
+# ---------------------------------------------------------------------------
+_REFERENCE_VALUE_COLS = (
+    [f"H|{l}" for l in TEMPLATE_MONTH_LABELS] + [f"F|{l}" for l in TEMPLATE_MONTH_LABELS]
+    + [f"OO|{l}" for l in OPEN_MONTH_LABELS] + [f"PO|{l}" for l in OPEN_MONTH_LABELS]
+    + ["Stock on Hand"]
+)
+_REFERENCE_META_COLS = ["Desc", "Brand name", "Buyer name"]
+
+
+def _section_of(col: str) -> str:
+    if col == "Stock on Hand":
+        return "Stock on Hand"
+    prefix, _, _ = col.partition("|")
+    return {"H": "History", "F": "Forecast", "OO": "Open Orders", "PO": "Open PO"}.get(prefix, col)
+
+
+def _norm_text(v) -> str:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    return str(v).strip()
+
+
+def load_reference_workbook(file) -> pd.DataFrame:
+    """Read a workbook in the required main-sheet layout (two header rows,
+    Plant/Mat#/Desc/Brand/Buyer + 12 history + 12 forecast + 4 Open Orders +
+    4 Open PO + Stock on Hand columns — 38 columns total) into the same
+    shape build_main_table() produces, positionally — the source's own
+    header text repeats ("Sept" appears 4 times) so it can't be used to
+    identify which section a column belongs to. Used by
+    compare_to_reference() to check a generated output against a hand-built
+    or previously-approved reference workbook."""
+    raw = pd.read_excel(file, sheet_name=0, header=None)
+    columns = TEMPLATE_ID_COLS + _REFERENCE_VALUE_COLS
+    body = raw.iloc[2:, :len(columns)].reset_index(drop=True)
+    body.columns = columns
+    body = body[body["Plant"].notna() & body["Mat #"].notna()].reset_index(drop=True)
+    body["Plant"] = _clean_id(body["Plant"])
+    body["Mat #"] = _clean_id(body["Mat #"])
+    return body
+
+
+def compare_to_reference(generated: pd.DataFrame, reference_file) -> pd.DataFrame:
+    """Compare a build_main_table() output against a reference workbook (a
+    file/buffer, or an already-loaded DataFrame in the same shape), keyed
+    by Plant + Material.
+
+    Returns one row per difference found — empty means an exact match on
+    every column both sides carry:
+        Section, Plant, Material, Month, Reference Value, Generated Value,
+        Difference, Issue Type
+
+    Issue Type is one of MISSING ROW (in reference, not generated), EXTRA
+    ROW (in generated, not reference), METADATA DIFFERENCE (Desc/Brand/
+    Buyer), BLANK VS ZERO (same value once you treat blank as 0 — reported
+    separately from a real NUMERIC DIFFERENCE, never silently ignored)."""
+    reference = (
+        reference_file if isinstance(reference_file, pd.DataFrame) else load_reference_workbook(reference_file)
+    )
+
+    gen = generated.copy()
+    gen["Plant"] = _clean_id(gen["Plant"].astype(str))
+    gen["Mat #"] = _clean_id(gen["Mat #"].astype(str))
+    gen = gen.drop_duplicates(subset=["Plant", "Mat #"]).set_index(["Plant", "Mat #"])
+
+    ref = reference.copy()
+    ref["Plant"] = _clean_id(ref["Plant"].astype(str))
+    ref["Mat #"] = _clean_id(ref["Mat #"].astype(str))
+    ref = ref.drop_duplicates(subset=["Plant", "Mat #"]).set_index(["Plant", "Mat #"])
+
+    gen_keys, ref_keys = set(gen.index), set(ref.index)
+    findings = []
+
+    for plant, mat in sorted(ref_keys - gen_keys):
+        findings.append({"Section": "Master Row", "Plant": plant, "Material": mat, "Month": None,
+                          "Reference Value": "present", "Generated Value": "missing",
+                          "Difference": None, "Issue Type": "MISSING ROW"})
+    for plant, mat in sorted(gen_keys - ref_keys):
+        findings.append({"Section": "Master Row", "Plant": plant, "Material": mat, "Month": None,
+                          "Reference Value": "missing", "Generated Value": "present",
+                          "Difference": None, "Issue Type": "EXTRA ROW"})
+
+    for plant, mat in sorted(gen_keys & ref_keys):
+        g_row, r_row = gen.loc[(plant, mat)], ref.loc[(plant, mat)]
+
+        for col in _REFERENCE_META_COLS:
+            g_val, r_val = _norm_text(g_row.get(col)), _norm_text(r_row.get(col))
+            if g_val != r_val:
+                findings.append({"Section": "Metadata", "Plant": plant, "Material": mat, "Month": col,
+                                  "Reference Value": r_val, "Generated Value": g_val,
+                                  "Difference": None, "Issue Type": "METADATA DIFFERENCE"})
+
+        for col in _REFERENCE_VALUE_COLS:
+            if col not in g_row.index or col not in r_row.index:
+                continue
+            g_val, r_val = g_row.get(col), r_row.get(col)
+            g_blank, r_blank = pd.isna(g_val), pd.isna(r_val)
+            g_num = 0.0 if g_blank else float(g_val)
+            r_num = 0.0 if r_blank else float(r_val)
+            if g_blank == r_blank and abs(g_num - r_num) < 1e-6:
+                continue
+            month = col.split("|", 1)[-1] if "|" in col else None
+            issue = "BLANK VS ZERO" if (g_blank != r_blank and abs(g_num - r_num) < 1e-6) else "NUMERIC DIFFERENCE"
+            findings.append({"Section": _section_of(col), "Plant": plant, "Material": mat, "Month": month,
+                              "Reference Value": None if r_blank else r_val,
+                              "Generated Value": None if g_blank else g_val,
+                              "Difference": g_num - r_num, "Issue Type": issue})
+
+    return pd.DataFrame(findings, columns=["Section", "Plant", "Material", "Month",
+                                            "Reference Value", "Generated Value", "Difference", "Issue Type"])
+
+
+def summarize_reference_comparison(diff: pd.DataFrame) -> pd.DataFrame:
+    """Roll a compare_to_reference() result up into the validation summary
+    requested alongside it: row counts, per-section differing-cell counts,
+    and reference/generated/difference totals for the numeric sections."""
+    rows = []
+
+    def add(label, value):
+        rows.append({"Metric": label, "Value": value})
+
+    if diff.empty:
+        add("Result", "Exact match — no differences found")
+        return pd.DataFrame(rows)
+
+    missing = diff[diff["Issue Type"] == "MISSING ROW"]
+    extra = diff[diff["Issue Type"] == "EXTRA ROW"]
+    meta = diff[diff["Issue Type"] == "METADATA DIFFERENCE"]
+    add("Missing rows (in reference, not generated)", len(missing))
+    add("Extra rows (in generated, not reference)", len(extra))
+    add("Metadata mismatches (Desc/Brand/Buyer)", len(meta))
+
+    for section in ["History", "Forecast", "Open Orders", "Open PO", "Stock on Hand"]:
+        sec = diff[diff["Section"] == section]
+        numeric = sec[sec["Issue Type"] == "NUMERIC DIFFERENCE"]
+        blank_zero = sec[sec["Issue Type"] == "BLANK VS ZERO"]
+        add(f"{section} — numeric differing cells", len(numeric))
+        add(f"{section} — blank-vs-zero cells", len(blank_zero))
+        if not numeric.empty:
+            ref_total = pd.to_numeric(numeric["Reference Value"], errors="coerce").fillna(0).sum()
+            gen_total = pd.to_numeric(numeric["Generated Value"], errors="coerce").fillna(0).sum()
+            add(f"{section} — reference total (differing cells only)", ref_total)
+            add(f"{section} — generated total (differing cells only)", gen_total)
+            add(f"{section} — difference", gen_total - ref_total)
+
+    return pd.DataFrame(rows)

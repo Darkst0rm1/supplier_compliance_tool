@@ -12,21 +12,27 @@ import pandas as pd
 import pytest
 
 from src.forecast_validation_engine import (
+    OPEN_MONTH_LABELS,
+    TEMPLATE_MONTH_LABELS,
     ForecastValidationError,
+    aggregate_open_orders_by_material,
     build_data_quality,
     build_forecast_validation,
     build_main_table,
     build_monthly_summary,
     build_plant_summary,
     combine_sales_orders,
+    compare_to_reference,
     default_history_and_forecast_months,
     generate_excel,
     load_forecast,
     load_open_orders,
     load_open_po,
+    load_reference_workbook,
     load_sales_orders,
     resolve_open_order_plants,
     same_period_window,
+    summarize_reference_comparison,
 )
 
 KEY_ACCOUNT_HEADERS = [
@@ -347,10 +353,16 @@ def _fact_two_years():
 
 
 def test_build_main_table_shape_and_missing_months_left_blank():
+    """Master rows come from the forecast file's own (Plant, Material)
+    pairs -- History then attaches to that row, blank where no month was
+    uploaded, never fabricated."""
     fact = _fact_two_years()
     hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
-    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
-    table = build_main_table(fact, empty_forecast, hist, fc)
+    forecast = pd.DataFrame([{
+        "Plant": "2910", "Material": "10026930", "Forecast Year": 2026,
+        "Forecast Month": 9, "Forecast Qty": None, "Buyer Name": "", "Brand Name": "",
+    }])
+    table = build_main_table(fact, forecast, hist, fc)
 
     assert len(table) == 1
     row = table.iloc[0]
@@ -359,7 +371,40 @@ def test_build_main_table_shape_and_missing_months_left_blank():
     assert row["H|Sept"] == 100          # Sept 2025 invoiced
     assert row["H|Aug"] == 84            # Aug 2026 invoiced (partial, but present)
     assert pd.isna(row["H|Jan"])         # Jan 2026 never uploaded -> blank, not zero
-    assert all(pd.isna(row[f"F|{l}"]) for l in ["Sept", "Oct ", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "June ", "July", "Aug"])
+
+
+def test_build_main_table_empty_forecast_produces_no_rows():
+    """With no forecast file at all, there is no master row list to attach
+    anything to -- real sales history alone does not create a row. This is
+    the deliberate consequence of the forecast-driven master list, not a
+    missing fallback."""
+    fact = _fact_two_years()
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+    table = build_main_table(fact, empty_forecast, hist, fc)
+    assert table.empty
+
+
+def test_build_main_table_ignores_history_at_a_plant_not_in_the_forecast():
+    """The defining case from the reference-workbook comparison: a material
+    sold at TWO plants but only forecast-planned at one must appear ONLY
+    for the forecast-planned plant, even though it has real sales history
+    at the other."""
+    rows = [
+        _plant_row(**{"Sales Order": "S1", "Plant": "2910", "Creation Date": datetime(2026, 8, 2),
+                       "Order Quantity (CS)": 10, "Invoice Quantity (CS)": 10}),
+        _plant_row(**{"Sales Order": "S2", "Plant": "2930", "Creation Date": datetime(2026, 8, 2),
+                       "Order Quantity (CS)": 5, "Invoice Quantity (CS)": 5}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, rows))])
+    hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
+    forecast = pd.DataFrame([{
+        "Plant": "2930", "Material": "10026930", "Forecast Year": 2026,
+        "Forecast Month": 9, "Forecast Qty": 50, "Buyer Name": "", "Brand Name": "",
+    }])
+    table = build_main_table(fact, forecast, hist, fc)
+    assert len(table) == 1
+    assert table.iloc[0]["Plant"] == 2930
 
 
 def test_build_main_table_includes_forecast_only_material():
@@ -379,28 +424,23 @@ def test_build_main_table_includes_forecast_only_material():
 
 
 def test_build_main_table_brand_buyer_apply_across_plants_for_same_material():
-    """A material sold at two plants but only listed once in the forecast
-    file (real SAP MRP exports often plan each material at one
-    representative plant) must carry that Brand/Buyer to BOTH plant rows --
-    who manages a SKU doesn't change by warehouse. Confirmed against a
-    reference workbook: same material, same Brand/Buyer at every plant."""
-    rows = [
-        _plant_row(**{"Sales Order": "S1", "Plant": "2910", "Plant Name": "TOL Mississauga",
-                       "Creation Date": datetime(2026, 8, 2),
-                       "Order Quantity (CS)": 10, "Invoice Quantity (CS)": 10}),
-        _plant_row(**{"Sales Order": "S2", "Plant": "2930", "Plant Name": "TOL Surrey",
-                       "Creation Date": datetime(2026, 8, 2),
-                       "Order Quantity (CS)": 5, "Invoice Quantity (CS)": 5}),
-    ]
-    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, rows))])
+    """A material forecast-planned at two plants, but the forecast file only
+    carries Brand/Buyer on ONE of those rows (real SAP MRP exports attach
+    Buyer/Brand per material, not consistently re-stated on every plant
+    line) must still show it on both -- who manages a SKU doesn't change by
+    warehouse. Confirmed against a reference workbook: same material, same
+    Brand/Buyer at every plant it's forecast-planned for."""
     hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
-    # Forecast file only has an entry for the 2930 side of this material.
-    forecast = pd.DataFrame([{
-        "Plant": "2930", "Material": "10026930", "Forecast Year": 2026,
-        "Forecast Month": 9, "Forecast Qty": 100, "Buyer Name": "Bita Farahani",
-        "Brand Name": "ROBERTSONS", "Material Description": "",
-    }])
-    table = build_main_table(fact, forecast, hist, fc)
+    forecast = pd.DataFrame([
+        {"Plant": "2930", "Material": "10026930", "Forecast Year": 2026, "Forecast Month": 9,
+         "Forecast Qty": 100, "Buyer Name": "Bita Farahani", "Brand Name": "ROBERTSONS",
+         "Material Description": ""},
+        {"Plant": "2910", "Material": "10026930", "Forecast Year": 2026, "Forecast Month": 9,
+         "Forecast Qty": 50, "Buyer Name": "", "Brand Name": "", "Material Description": ""},
+    ])
+    empty_fact = pd.DataFrame(columns=["Plant", "Material", "Order Date", "Order Qty", "Invoice Qty",
+                                        "Material Description", "Plant Name", "Year", "Month"])
+    table = build_main_table(empty_fact, forecast, hist, fc)
     row_2910 = table[(table["Plant"] == 2910) & (table["Mat #"] == "10026930")].iloc[0]
     assert row_2910["Brand name"] == "ROBERTSONS"
     assert row_2910["Buyer name"] == "Bita Farahani"
@@ -757,29 +797,43 @@ def test_load_open_po_missing_required_column_raises():
 # ---------------------------------------------------------------------------
 def test_build_main_table_includes_open_orders_po_and_stock():
     """Stock on Hand comes only from the Open PO export's own column --
-    there is no separate dedicated stock/inventory source."""
+    there is no separate dedicated stock/inventory source. Open Orders is
+    Material + Month only (no Plant): the same value must show up on every
+    forecast-planned plant row for that material -- confirmed against the
+    reference workbook, which repeats the identical figure across plants
+    rather than splitting it."""
     fact = _fact_two_years()
     hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
-    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+    forecast = pd.DataFrame([
+        {"Plant": "2910", "Material": "10026930", "Forecast Year": 2026, "Forecast Month": 9,
+         "Forecast Qty": None, "Buyer Name": "", "Brand Name": ""},
+        {"Plant": "2920", "Material": "10026930", "Forecast Year": 2026, "Forecast Month": 9,
+         "Forecast Qty": None, "Buyer Name": "", "Brand Name": ""},
+    ])
 
     open_orders = pd.DataFrame([{
-        "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9, "Open Order Qty": 42,
+        "Plant": "", "Material": "10026930", "Year": 2026, "Month": 9, "Open Order Qty": 42,
     }])
     open_po = pd.DataFrame([{
         "Plant": "2910", "Material": "10026930", "Year": 2026, "Month": 9,
         "Open PO Qty": 100, "Stock on Hand": 7,
     }])
 
-    table = build_main_table(fact, empty_forecast, hist, fc, open_orders=open_orders, open_po=open_po)
-    row = table[table["Mat #"] == "10026930"].iloc[0]
-    assert row["OO|Sept"] == 42
-    assert row["PO|Sept"] == 100
-    assert row["Stock on Hand"] == 7
+    table = build_main_table(fact, forecast, hist, fc, open_orders=open_orders, open_po=open_po)
+    row_2910 = table[(table["Plant"] == 2910) & (table["Mat #"] == "10026930")].iloc[0]
+    row_2920 = table[(table["Plant"] == 2920) & (table["Mat #"] == "10026930")].iloc[0]
+    assert row_2910["OO|Sept"] == 42
+    assert row_2920["OO|Sept"] == 42       # same material-level value, not split
+    assert row_2910["PO|Sept"] == 100      # Open PO IS plant-specific -- real supply location
+    assert pd.isna(row_2920["PO|Sept"])    # no PO recorded for 2920
+    assert row_2910["Stock on Hand"] == 7
 
 
-def test_build_main_table_includes_material_with_only_an_open_po():
-    """A material that has never sold but has an incoming PO should still
-    appear -- it's real, actionable information even with zero history."""
+def test_build_main_table_excludes_material_that_is_not_forecast_planned():
+    """A material with only an open PO but no forecast entry must NOT
+    appear -- the master row list is the forecast file's own population,
+    not a union with open orders/PO/history. This is the deliberate
+    consequence of the reference-workbook-confirmed master-list rule."""
     fact = _fact_two_years()
     hist, fc = default_history_and_forecast_months(date(2026, 8, 27))
     empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
@@ -788,4 +842,159 @@ def test_build_main_table_includes_material_with_only_an_open_po():
         "Open PO Qty": 60, "Stock on Hand": None,
     }])
     table = build_main_table(fact, empty_forecast, hist, fc, open_po=open_po)
-    assert (table["Mat #"] == "55555555").any()
+    assert not (table["Mat #"] == "55555555").any()
+
+
+# ---------------------------------------------------------------------------
+# aggregate_open_orders_by_material
+# ---------------------------------------------------------------------------
+def test_aggregate_open_orders_by_material_sums_across_plants():
+    """The KPI-safe total: sums the RAW source once per Material+Month,
+    never per the broadcast display row (see build_main_table)."""
+    open_orders = pd.DataFrame([
+        {"Sales Order": "1", "Material": "10026930", "Plant": "2910", "Year": 2026, "Month": 9, "Open Order Qty": 10},
+        {"Sales Order": "2", "Material": "10026930", "Plant": "2920", "Year": 2026, "Month": 9, "Open Order Qty": 5},
+    ])
+    agg = aggregate_open_orders_by_material(open_orders)
+    row = agg[(agg["Material"] == "10026930") & (agg["Year"] == 2026) & (agg["Month"] == 9)].iloc[0]
+    assert row["Open Order Qty"] == 15
+
+
+def test_aggregate_open_orders_by_material_empty_input():
+    agg = aggregate_open_orders_by_material(pd.DataFrame(columns=["Material", "Year", "Month", "Open Order Qty"]))
+    assert agg.empty
+
+
+# ---------------------------------------------------------------------------
+# compare_to_reference / load_reference_workbook / summarize_reference_comparison
+# ---------------------------------------------------------------------------
+from src.forecast_validation_engine import TEMPLATE_ID_COLS as _REF_ID_COLS  # noqa: E402
+
+_REFERENCE_VALUE_COLS_FOR_TEST = (
+    [f"H|{l}" for l in TEMPLATE_MONTH_LABELS] + [f"F|{l}" for l in TEMPLATE_MONTH_LABELS]
+    + [f"OO|{l}" for l in OPEN_MONTH_LABELS] + [f"PO|{l}" for l in OPEN_MONTH_LABELS]
+    + ["Stock on Hand"]
+)
+
+
+def _reference_xlsx(rows):
+    """Build a synthetic reference workbook in the exact required layout:
+    2 header rows (row 1 section labels, row 2 column names), data from
+    row 3, 38 columns total (5 id + 12 hist + 12 forecast + 4 OO + 4 PO + 1 stock)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append([None] * 38)
+    header = (_REF_ID_COLS + list(TEMPLATE_MONTH_LABELS) + list(TEMPLATE_MONTH_LABELS)
+              + list(OPEN_MONTH_LABELS) + list(OPEN_MONTH_LABELS) + ["Stock on Hand"])
+    ws.append(header)
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def _reference_row(plant, mat, desc="D", brand="B", buyer="U", **overrides):
+    row = {"Plant": plant, "Mat #": mat, "Desc": desc, "Brand name": brand, "Buyer name": buyer}
+    for col in _REFERENCE_VALUE_COLS_FOR_TEST:
+        row[col] = overrides.get(col)
+    ordered_cols = _REF_ID_COLS + _REFERENCE_VALUE_COLS_FOR_TEST
+    return [row[c] for c in ordered_cols]
+
+
+def test_load_reference_workbook_parses_fixed_layout():
+    rows = [_reference_row("2910", "10013759", **{"H|Sept": 100, "F|Sept": 50, "Stock on Hand": 64})]
+    df = load_reference_workbook(_reference_xlsx(rows))
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["Plant"] == "2910"
+    assert row["Mat #"] == "10013759"
+    assert row["H|Sept"] == 100
+    assert row["F|Sept"] == 50
+    assert row["Stock on Hand"] == 64
+
+
+def test_compare_to_reference_exact_match_is_empty():
+    ref_rows = [_reference_row("2910", "10013759", **{"H|Sept": 100})]
+    reference = load_reference_workbook(_reference_xlsx(ref_rows))
+    generated = pd.DataFrame([{
+        "Plant": "2910", "Mat #": "10013759", "Desc": "D", "Brand name": "B", "Buyer name": "U",
+        **{c: None for c in _REFERENCE_VALUE_COLS_FOR_TEST}, "H|Sept": 100,
+    }])
+    diff = compare_to_reference(generated, reference)
+    assert diff.empty
+
+
+def test_compare_to_reference_finds_missing_and_extra_rows():
+    reference = load_reference_workbook(_reference_xlsx([_reference_row("2910", "10013759")]))
+    generated = pd.DataFrame([{
+        "Plant": "2920", "Mat #": "99999999", "Desc": "", "Brand name": "", "Buyer name": "",
+        **{c: None for c in _REFERENCE_VALUE_COLS_FOR_TEST},
+    }])
+    diff = compare_to_reference(generated, reference)
+    issue_types = set(diff["Issue Type"])
+    assert "MISSING ROW" in issue_types
+    assert "EXTRA ROW" in issue_types
+    missing = diff[diff["Issue Type"] == "MISSING ROW"].iloc[0]
+    assert (missing["Plant"], missing["Material"]) == ("2910", "10013759")
+    extra = diff[diff["Issue Type"] == "EXTRA ROW"].iloc[0]
+    assert (extra["Plant"], extra["Material"]) == ("2920", "99999999")
+
+
+def test_compare_to_reference_detects_metadata_and_numeric_differences():
+    reference = load_reference_workbook(_reference_xlsx([
+        _reference_row("2910", "10013759", brand="ALIMENTIAS SPANISH CHEESE", **{"H|Sept": 506}),
+    ]))
+    generated = pd.DataFrame([{
+        "Plant": "2910", "Mat #": "10013759", "Desc": "D", "Brand name": "WRONG BRAND", "Buyer name": "U",
+        **{c: None for c in _REFERENCE_VALUE_COLS_FOR_TEST}, "H|Sept": 113,
+    }])
+    diff = compare_to_reference(generated, reference)
+    meta = diff[diff["Issue Type"] == "METADATA DIFFERENCE"]
+    assert len(meta) == 1
+    assert meta.iloc[0]["Month"] == "Brand name"
+
+    numeric = diff[diff["Issue Type"] == "NUMERIC DIFFERENCE"]
+    assert len(numeric) == 1
+    row = numeric.iloc[0]
+    assert row["Section"] == "History"
+    assert row["Month"] == "Sept"
+    assert row["Reference Value"] == 506
+    assert row["Generated Value"] == 113
+    assert row["Difference"] == 113 - 506
+
+
+def test_compare_to_reference_distinguishes_blank_vs_zero_from_real_difference():
+    reference = load_reference_workbook(_reference_xlsx([
+        _reference_row("2910", "10013759", **{"H|Oct ": 0}),   # explicit zero in reference ("Oct " has a trailing space, matching TEMPLATE_MONTH_LABELS)
+    ]))
+    generated = pd.DataFrame([{
+        "Plant": "2910", "Mat #": "10013759", "Desc": "D", "Brand name": "B", "Buyer name": "U",
+        **{c: None for c in _REFERENCE_VALUE_COLS_FOR_TEST},  # blank, not zero
+    }])
+    diff = compare_to_reference(generated, reference)
+    assert len(diff) == 1
+    assert diff.iloc[0]["Issue Type"] == "BLANK VS ZERO"
+
+
+def test_summarize_reference_comparison_exact_match():
+    summary = summarize_reference_comparison(pd.DataFrame(columns=[
+        "Section", "Plant", "Material", "Month", "Reference Value", "Generated Value", "Difference", "Issue Type"
+    ]))
+    assert "Exact match" in summary.iloc[0]["Value"]
+
+
+def test_summarize_reference_comparison_totals_numeric_sections():
+    reference = load_reference_workbook(_reference_xlsx([_reference_row("2910", "10013759", **{"H|Sept": 506})]))
+    generated = pd.DataFrame([{
+        "Plant": "2910", "Mat #": "10013759", "Desc": "D", "Brand name": "B", "Buyer name": "U",
+        **{c: None for c in _REFERENCE_VALUE_COLS_FOR_TEST}, "H|Sept": 113,
+    }])
+    diff = compare_to_reference(generated, reference)
+    summary = summarize_reference_comparison(diff).set_index("Metric")["Value"]
+    assert summary["History — numeric differing cells"] == 1
+    assert summary["History — reference total (differing cells only)"] == 506
+    assert summary["History — generated total (differing cells only)"] == 113
+    assert summary["History — difference"] == 113 - 506

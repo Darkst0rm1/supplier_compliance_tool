@@ -22,6 +22,7 @@ from src.forecast_validation_engine import (
     MONTH_ABBR,
     REQUIRED_PLANTS,
     ForecastValidationError,
+    aggregate_open_orders_by_material,
     build_data_quality,
     build_forecast_validation,
     build_item_detail,
@@ -35,7 +36,6 @@ from src.forecast_validation_engine import (
     load_open_orders,
     load_open_po,
     load_sales_orders,
-    resolve_open_order_plants,
 )
 
 
@@ -90,13 +90,11 @@ with col_oo:
         help=(
             "Sales orders already booked with a future Requested Delivery "
             "Date (Sales Order, Material, Requested Delivery Date, Order "
-            "Quantity). Best if this includes a Plant column — add it as a "
-            "field when pulling this report from SAP, the same way the "
-            "Sales Order export has a Key Account #/Plant variant. Without "
-            "a Plant column, it's resolved by matching back to the SAP "
-            "Sales Order exports above, which usually leaves most rows "
-            "unmatched (an open order can reference a Sales Order created "
-            "many months before its delivery date — see Data Quality)."
+            "Quantity). Summed by Material + Month and shown on every plant "
+            "row that material is forecast-planned for — matching the "
+            "reference template, which repeats the same figure across "
+            "plants rather than splitting it. A Plant column in this file, "
+            "if present, isn't used for this."
         ),
     )
 with col_po:
@@ -135,8 +133,12 @@ def _process(so_bytes: tuple[bytes, ...], fc_bytes: bytes | None,
         forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month",
                                           "Forecast Qty", "Buyer Name", "Brand Name", "Material Description"])
 
+    # Open Orders is aggregated by Material + Month only (see build_main_table)
+    # -- it has no reliable Plant of its own, and the reference output
+    # repeats the same material-level figure on every forecast-planned plant
+    # rather than trying to split it, so no Plant resolution is needed here.
     if oo_bytes is not None:
-        open_orders = resolve_open_order_plants(load_open_orders(io.BytesIO(oo_bytes)), fact)
+        open_orders = load_open_orders(io.BytesIO(oo_bytes))
     else:
         open_orders = pd.DataFrame(columns=["Sales Order", "Material", "Plant", "Year", "Month", "Open Order Qty"])
 
@@ -189,6 +191,7 @@ item_detail = result["item_detail"]
 monthly_summary = result["monthly_summary"]
 data_quality = result["data_quality"]
 data_as_of = result["data_as_of"]
+open_orders = result["open_orders"]
 
 st.success(f"Processed {len(result['fact']):,} sales order lines. Data as of {data_as_of:%b %d, %Y}.")
 if fc_file is None:
@@ -212,9 +215,13 @@ invoice_completion = (
     if not monthly_summary.empty and (monthly_summary["Period"] == f"{data_as_of:%b %Y}").any() else None
 )
 status_counts = validation["Assessment"].value_counts() if not validation.empty else pd.Series(dtype=int)
-oo_cols = [c for c in main_table.columns if c.startswith("OO|")]
 po_cols = [c for c in main_table.columns if c.startswith("PO|")]
-total_open_orders = main_table[oo_cols].sum().sum() if oo_cols else 0
+# Open Orders is repeated on every plant row a material is forecast-planned
+# for (see build_main_table) -- summing the display column would multiply-
+# count the same order once per plant it's shown on. The KPI-safe total
+# comes from the Material+Month aggregate instead.
+oo_totals = aggregate_open_orders_by_material(open_orders)
+total_open_orders = oo_totals["Open Order Qty"].sum() if not oo_totals.empty else 0
 total_open_po = main_table[po_cols].sum().sum() if po_cols else 0
 total_stock = main_table["Stock on Hand"].sum() if "Stock on Hand" in main_table.columns else 0
 
