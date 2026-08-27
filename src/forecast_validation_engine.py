@@ -15,6 +15,7 @@ that hasn't invoiced yet is real demand, not zero demand.
 """
 from __future__ import annotations
 
+import calendar
 import io
 import re
 from dataclasses import dataclass
@@ -520,6 +521,13 @@ def _fmt_day(d: date) -> str:
     return f"{d.strftime('%b')} {d.day}"
 
 
+def _is_month_complete(d: date) -> bool:
+    """True if ``d`` is the last calendar day of its month — data uploaded
+    through, say, Dec 31 covers a FULL December, not a partial one, even
+    though December is "the month data_as_of falls in"."""
+    return calendar.monthrange(d.year, d.month)[1] == d.day
+
+
 # ---------------------------------------------------------------------------
 # Main (template-shaped) table
 # ---------------------------------------------------------------------------
@@ -830,9 +838,11 @@ def build_monthly_summary(fact: pd.DataFrame, data_as_of: pd.Timestamp) -> pd.Da
         pct = grouped["Invoice Qty"] / grouped["Order Qty"]
     grouped["Invoice Completion %"] = pct.where(grouped["Order Qty"] > 0)
     grouped["Period"] = grouped.apply(lambda r: f"{MONTH_ABBR[int(r['Month']) - 1]} {int(r['Year'])}", axis=1)
+    is_current_month_partial = not _is_month_complete(data_as_of.date())
     grouped["Period Type"] = grouped.apply(
         lambda r: "PARTIAL MONTH (through {:%b %d, %Y})".format(data_as_of)
-        if (int(r["Year"]), int(r["Month"])) == (data_as_of.year, data_as_of.month) else "FULL MONTH",
+        if is_current_month_partial and (int(r["Year"]), int(r["Month"])) == (data_as_of.year, data_as_of.month)
+        else "FULL MONTH",
         axis=1,
     )
     return grouped.sort_values(["Year", "Month"])[[
@@ -935,7 +945,7 @@ def generate_excel(main_table: pd.DataFrame, validation: pd.DataFrame,
     ws.cell(1, 18).alignment = center
 
     hist_labels = list(TEMPLATE_MONTH_LABELS)
-    if data_as_of is not None:
+    if data_as_of is not None and not _is_month_complete(data_as_of.date()):
         for i, (y, m) in enumerate(hist_months):
             if (y, m) == (data_as_of.year, data_as_of.month):
                 hist_labels[i] = hist_labels[i].strip() + " (partial)"

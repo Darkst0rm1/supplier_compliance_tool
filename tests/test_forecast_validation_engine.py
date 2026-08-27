@@ -472,6 +472,20 @@ def test_monthly_summary_flags_current_month_partial():
     assert aug_2025["Period Type"] == "FULL MONTH"
 
 
+def test_monthly_summary_does_not_flag_partial_when_data_as_of_is_last_day_of_month():
+    """Data uploaded through Dec 31 covers a full December -- it must not
+    read as PARTIAL just because December is "the month data_as_of falls
+    in"."""
+    rows = [
+        _plant_row(**{"Sales Order": "D1", "Creation Date": datetime(2025, 12, 15),
+                       "Order Quantity (CS)": 10, "Invoice Quantity (CS)": 10}),
+    ]
+    fact = combine_sales_orders([load_sales_orders(_xlsx(PLANT_HEADERS, rows))])
+    result = build_monthly_summary(fact, pd.Timestamp(2025, 12, 31))
+    dec_2025 = result[result["Period"] == "Dec 2025"].iloc[0]
+    assert dec_2025["Period Type"] == "FULL MONTH"
+
+
 def test_data_quality_flags_invoice_over_order_and_negative_qty():
     rows = [
         _plant_row(**{"Sales Order": "X1", "Order Quantity (CS)": 5, "Invoice Quantity (CS)": 8}),
@@ -520,6 +534,20 @@ def test_generate_excel_main_sheet_matches_template_layout():
     merged = {str(r) for r in ws.merged_cells.ranges}
     assert merged == {"F1:Q1", "R1:AC1", "AD1:AG1", "AH1:AK1", "AL1:AL2"}
     assert set(wb.sheetnames) == {"Sheet1", "Forecast Validation", "Plant Summary", "Item Detail", "Monthly Summary", "Data Quality"}
+
+
+def test_generate_excel_does_not_mark_partial_when_data_as_of_is_last_day_of_month():
+    fact = _fact_two_years()
+    hist, fc = default_history_and_forecast_months(date(2025, 12, 31))
+    empty_forecast = pd.DataFrame(columns=["Plant", "Material", "Forecast Year", "Forecast Month", "Forecast Qty"])
+    table = build_main_table(fact, empty_forecast, hist, fc)
+    dq = build_data_quality(fact, empty_forecast, hist)
+
+    data = generate_excel(table, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), dq,
+                           hist, fc, pd.Timestamp(2025, 12, 31))
+    ws = openpyxl.load_workbook(io.BytesIO(data))["Sheet1"]
+    header = [ws.cell(2, c).value for c in range(1, 18)]
+    assert "Dec" in header and "(partial)" not in " ".join(str(h) for h in header)
 
 
 # ---------------------------------------------------------------------------
