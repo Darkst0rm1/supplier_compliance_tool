@@ -42,5 +42,9 @@ pg = st.navigation([
         "pages/9_Supplier_Summary_Dashboard.py",
         title="Supplier Summary Dashboard",
     ),
+    st.Page(
+        "pages/10_Forecast_Validation.py",
+        title="Forecast Validation",
+    ),
 ])
 pg.run()
